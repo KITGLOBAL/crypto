@@ -1,0 +1,14 @@
+# Файлы зависимостей и логи
+node_modules
+npm-debug.log
+
+# Папка с собранным проектом (мы собираем ее внутри Docker)
+dist
+
+# Файлы Docker
+Dockerfile
+docker-compose.yml
+
+# Системные файлы
+.git
+.gitignore

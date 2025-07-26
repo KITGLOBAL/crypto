@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: liquidation-tracker-app
+    restart: unless-stopped
+    environment:
+      - FUTURES_WS_URL=${FUTURES_WS_URL}
+      - MONGO_URI=${MONGO_URI_LOCAL} 
+      - MONGO_DB_NAME=${MONGO_DB_NAME}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}

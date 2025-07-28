@@ -170,7 +170,7 @@ export class ReportingService {
         let topMoversReport = '';
 
         if(topLongs || topShorts){
-            topMoversReport = '*Top Movers* 🏆\n';
+            topMoversReport = '*Top rekted rank* 🏆\n';
             if(topLongs) topMoversReport += `  *Top Long Liquidations:*\n${topLongs}\n`;
             if(topShorts) topMoversReport += `  *Top Short Liquidations:*\n${topShorts}\n`;
         }

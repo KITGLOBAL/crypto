@@ -74,6 +74,15 @@ export class DatabaseService {
         }).toArray();
     }
 
+    public async getOverallLiquidationsBetween(startTime: Date, endTime: Date): Promise<WithId<LiquidationData>[]> {
+        const collection = this.db.collection<LiquidationData>(this.liquidationsCollectionName);
+        return collection.find({
+            time: {
+                $gte: startTime.toISOString(),
+                $lt: endTime.toISOString()
+            }
+        }).toArray();
+    }
 
     public async findOrCreateUser(chatId: number, firstName?: string, username?: string): Promise<User> {
         const collection = this.db.collection<User>(this.usersCollectionName);
@@ -131,6 +140,14 @@ export class DatabaseService {
         await collection.updateOne({ chatId }, { $set: { trackedSymbols } });
         console.log(`[${chatId}] Toggled symbol ${symbol}. New list: [${trackedSymbols.join(', ')}]`);
         return { ...user, trackedSymbols };
+    }
+
+    public async setAllSymbolsForUser(chatId: number, symbols: string[]): Promise<User | null> {
+        const collection = this.db.collection<User>(this.usersCollectionName);
+        await collection.updateOne({ chatId }, { $set: { trackedSymbols: symbols } });
+        console.log(`[${chatId}] Set all symbols. New list length: ${symbols.length}`);
+        const updatedUser = await this.getUser(chatId);
+        return updatedUser;
     }
 
     public async toggleUserNotifications(chatId: number): Promise<User | null> {

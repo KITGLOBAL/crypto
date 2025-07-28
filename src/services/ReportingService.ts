@@ -11,7 +11,7 @@ type LiquidationStats = {
 
 export class ReportingService {
     private dbService: DatabaseService;
-    private telegramService!: TelegramService;
+    private telegramService!: TelegramService; 
 
     constructor(dbService: DatabaseService) {
         this.dbService = dbService;
@@ -24,10 +24,10 @@ export class ReportingService {
 
     public start(): void {
         const reportCronPattern = '0 * * * *';
-        console.log(`🚀 Reporting service scheduled with cron pattern: "${reportCronPattern}"`);
+        console.log(`🚀 Scheduled reporting service with cron pattern: "${reportCronPattern}"`);
         cron.schedule(reportCronPattern, () => {
-            console.log('🕒 Cron job triggered: Checking which users need reports...');
-            this.generateAndSendReports();
+            console.log('🕒 Cron job triggered: Checking for scheduled reports...');
+            this.generateAndSendScheduledReports();
         });
 
         const cleanupCronPattern = '0 0 * * *';
@@ -44,24 +44,18 @@ export class ReportingService {
         await this.dbService.deleteOldLiquidations(fortyEightHoursAgo);
     }
 
-    public async generateAndSendReports(): Promise<void> {
+    public async generateAndSendScheduledReports(): Promise<void> {
+        console.log('Checking schedules for automated reports...');
         const activeUsers = await this.dbService.getActiveUsers();
-        if (activeUsers.length === 0) {
-            console.log('No active users to report to.');
-            return;
-        }
+        if (activeUsers.length === 0) return;
 
-        console.log(`Found ${activeUsers.length} active users. Checking schedules...`);
         const currentHour = new Date().getHours();
-
         for (const user of activeUsers) {
             if (currentHour % user.reportIntervalHours === 0) {
-                console.log(`[${user.chatId}] It's time for their ${user.reportIntervalHours}-hour report. Generating...`);
-                const reportMessage = await this.generateReportForUser(user, user.reportIntervalHours);
+                console.log(`[${user.chatId}] It's time for their scheduled ${user.reportIntervalHours}-hour report. Generating...`);
+                const reportMessage = await this.generateReportForUser(user, user.reportIntervalHours, true);
                 if (reportMessage) {
                     await this.telegramService.sendMessage(user.chatId, reportMessage);
-                } else {
-                    console.log(`[${user.chatId}] No significant liquidations to report in the last ${user.reportIntervalHours} hours.`);
                 }
             }
         }
@@ -82,11 +76,8 @@ export class ReportingService {
 
             for (const liq of liquidations) {
                 const value = liq.price * liq.quantity;
-                if (liq.side === 'long liquidation') {
-                    symbolLongsValue += value;
-                } else {
-                    symbolShortsValue += value;
-                }
+                if (liq.side === 'long liquidation') symbolLongsValue += value;
+                else symbolShortsValue += value;
             }
             if (symbolLongsValue > 0 || symbolShortsValue > 0) {
                  statsMap.set(symbol, { longs: symbolLongsValue, shorts: symbolShortsValue });
@@ -95,20 +86,37 @@ export class ReportingService {
         return statsMap;
     }
 
-    public async generateReportForUser(user: User, intervalHours: number): Promise<string | null> {
+    public async generateReportForUser(user: User, intervalHours: number, isScheduled: boolean = false): Promise<string | null> {
         const now = new Date();
-        const reportPeriodEnd = now;
-        const reportPeriodStart = new Date(reportPeriodEnd);
-        reportPeriodStart.setHours(reportPeriodStart.getHours() - intervalHours);
-        
-        const previousPeriodStart = new Date(reportPeriodStart);
-        previousPeriodStart.setHours(previousPeriodStart.getHours() - intervalHours);
-        
+        let reportPeriodStart: Date, reportPeriodEnd: Date;
+        let previousPeriodStart: Date, previousPeriodEnd: Date;
+        let reportTitle: string;
+
+        if (isScheduled) {
+            reportPeriodEnd = new Date(now);
+            reportPeriodStart = new Date(reportPeriodEnd);
+            reportPeriodStart.setHours(reportPeriodStart.getHours() - intervalHours);
+            
+            previousPeriodEnd = new Date(reportPeriodStart);
+            previousPeriodStart = new Date(previousPeriodEnd);
+            previousPeriodStart.setHours(previousPeriodStart.getHours() - intervalHours);
+            reportTitle = `*${intervalHours}-Hour Liquidation Report* 📊\n_(Compared to the previous ${intervalHours} hours)_`;
+        } else {
+            reportPeriodEnd = new Date(now);
+            reportPeriodStart = new Date(now);
+            reportPeriodStart.setMinutes(0, 0, 0);
+
+            previousPeriodEnd = new Date(reportPeriodStart);
+            previousPeriodStart = new Date(previousPeriodEnd);
+            previousPeriodStart.setHours(previousPeriodStart.getHours() - intervalHours);
+            reportTitle = `*Live Report for Current Hour* 📊\n_(Compared to the previous full hour)_`;
+        }
+
         const currentStats = await this.getStatsForPeriod(user.trackedSymbols, reportPeriodStart, reportPeriodEnd);
-        const previousStats = await this.getStatsForPeriod(user.trackedSymbols, previousPeriodStart, reportPeriodStart);
+        const previousStats = await this.getStatsForPeriod(user.trackedSymbols, previousPeriodStart, previousPeriodEnd);
 
         if (currentStats.size === 0) {
-            return null; 
+            return `No liquidations recorded for your tracked pairs in the current period.`;
         }
 
         let longsReport = '';
@@ -119,18 +127,27 @@ export class ReportingService {
         for (const symbol of currentStats.keys()) {
             const current = currentStats.get(symbol)!;
             const previous = previousStats.get(symbol) || { longs: 0, shorts: 0 };
+            
+            let comparisonLongs = previous.longs;
+            let comparisonShorts = previous.shorts;
+            if(!isScheduled){
+                 const minutesPassed = (reportPeriodEnd.getTime() - reportPeriodStart.getTime()) / (1000 * 60);
+                 const scaleFactor = minutesPassed / (intervalHours * 60);
+                 comparisonLongs *= scaleFactor;
+                 comparisonShorts *= scaleFactor;
+            }
 
             if (current.longs > 0) {
                 let trend = '';
-                if (current.longs > previous.longs) trend = ' ⬆️';
-                else if (current.longs < previous.longs) trend = ' ⬇️';
+                if (current.longs > comparisonLongs) trend = ' ⬆️';
+                else if (current.longs < comparisonLongs) trend = ' ⬇️';
                 longsReport += `  ▪️ ${symbol}: $${this.formatCurrency(current.longs)}${trend}\n`;
                 totalLongsValue += current.longs;
             }
             if (current.shorts > 0) {
                 let trend = '';
-                if (current.shorts > previous.shorts) trend = ' ⬆️';
-                else if (current.shorts < previous.shorts) trend = ' ⬇️';
+                if (current.shorts > comparisonShorts) trend = ' ⬆️';
+                else if (current.shorts < comparisonShorts) trend = ' ⬇️';
                 shortsReport += `  ▪️ ${symbol}: $${this.formatCurrency(current.shorts)}${trend}\n`;
                 totalShortsValue += current.shorts;
             }
@@ -153,12 +170,12 @@ export class ReportingService {
         let topMoversReport = '';
 
         if(topLongs || topShorts){
-            topMoversReport = '*Top rekted* 🏆\n';
+            topMoversReport = '*Top Movers* 🏆\n';
             if(topLongs) topMoversReport += `  *Top Long Liquidations:*\n${topLongs}\n`;
             if(topShorts) topMoversReport += `  *Top Short Liquidations:*\n${topShorts}\n`;
         }
 
-        let finalReport = `*${intervalHours}-Hour Liquidation Report* 📊\n_(Compared to the previous ${intervalHours} hours)_\n\n`;
+        let finalReport = `${reportTitle}\n\n`;
 
         if (longsReport) {
             finalReport += `*🔴 LONGS LIQUIDATED*\n${longsReport}  *Subtotal: $${this.formatCurrency(totalLongsValue)}*\n\n`;

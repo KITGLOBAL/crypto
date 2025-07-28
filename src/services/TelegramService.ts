@@ -6,6 +6,7 @@ import { ReportingService } from './ReportingService';
 import { SYMBOLS_TO_TRACK } from '../config';
 
 type UserState = 'awaiting_threshold';
+const PAIRS_PAGE_SIZE = 30;
 
 export class TelegramService {
     private bot: TelegramBot;
@@ -24,11 +25,57 @@ export class TelegramService {
 
     private listenForCommands(): void {
         this.bot.onText(/\/start/, this.handleStart.bind(this));
-        this.bot.onText(/📢 Report Now/, this.handleReportNow.bind(this)); 
+        this.bot.onText(/📢 Report Now/, this.handleReportNow.bind(this));
+        this.bot.onText(/📊 Market Stats/, this.handleMarketStats.bind(this));
         this.bot.onText(/⚙️ Settings/, this.handleSettings.bind(this));
         this.bot.onText(/🔇 Mute Alerts|🔊 Unmute Alerts/, this.handleMuteToggle.bind(this));
         this.bot.on('callback_query', this.handleCallbackQuery.bind(this));
         this.bot.on('message', this.handleMessage.bind(this));
+    }
+
+    private async handleMarketStats(msg: Message): Promise<void> {
+        const chatId = msg.chat.id;
+        await this.bot.sendMessage(chatId, 'Calculating market stats, please wait...');
+
+        const now = new Date();
+        const twentyFourHoursAgo = new Date(now.getTime() - (24 * 60 * 60 * 1000));
+
+        const liquidations = await this.dbService.getOverallLiquidationsBetween(twentyFourHoursAgo, now);
+
+        if (liquidations.length === 0) {
+            await this.bot.sendMessage(chatId, 'No liquidations were recorded in the last 24 hours.');
+            return;
+        }
+
+        let totalLongsValue = 0;
+        let totalShortsValue = 0;
+
+        for (const liq of liquidations) {
+            const value = liq.price * liq.quantity;
+            if (liq.side === 'long liquidation') {
+                totalLongsValue += value;
+            } else {
+                totalShortsValue += value;
+            }
+        }
+
+        const formatValue = (value: number) => `$${(value / 1000000).toFixed(2)}M`;
+
+        let dominanceMessage = '';
+        if (totalLongsValue > totalShortsValue) {
+            dominanceMessage = 'Longs liquidations are dominating.';
+        } else if (totalShortsValue > totalLongsValue) {
+            dominanceMessage = 'Shorts liquidations are dominating.';
+        } else {
+            dominanceMessage = 'The market is balanced.';
+        }
+
+        const reportMessage = `*Market Stats for the Last 24 Hours* 📈\n\n` +
+                              `🔴 Total Longs: *${formatValue(totalLongsValue)}*\n` +
+                              `🟢 Total Shorts: *${formatValue(totalShortsValue)}*\n\n` +
+                              `_${dominanceMessage}_`;
+
+        await this.bot.sendMessage(chatId, reportMessage, { parse_mode: 'Markdown' });
     }
 
     private async handleReportNow(msg: Message): Promise<void> {
@@ -55,7 +102,8 @@ export class TelegramService {
         const muteButtonText = user.notificationsEnabled ? '🔇 Mute Alerts' : '🔊 Unmute Alerts';
         return {
             keyboard: [
-                [{ text: '📢 Report Now' }, { text: muteButtonText }, { text: '⚙️ Settings' }]
+                [{ text: '📢 Report Now' }, { text: '📊 Market Stats'}],
+                [{ text: muteButtonText }, { text: '⚙️ Settings' }]
             ],
             resize_keyboard: true,
         };
@@ -88,7 +136,7 @@ export class TelegramService {
         const chatId = msg.chat.id;
         if (msg.text) {
             const commandText = msg.text;
-            const handledCommands = ['/start', '📢 Report Now', '⚙️ Settings', '🔇 Mute Alerts', '🔊 Unmute Alerts'];
+            const handledCommands = ['/start', '📢 Report Now', '📊 Market Stats', '⚙️ Settings', '🔇 Mute Alerts', '🔊 Unmute Alerts'];
             if(handledCommands.includes(commandText)) return;
         }
 
@@ -132,7 +180,7 @@ export class TelegramService {
             parse_mode: 'Markdown' as const,
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: '📊 Tracked Pairs', callback_data: 'menu:pairs' }],
+                    [{ text: '📊 Tracked Pairs', callback_data: 'menu:pairs:0' }],
                     [{ text: '⏰ Aggregate data interval', callback_data: 'menu:interval' }],
                     [{ text: '💰 Alert Threshold', callback_data: 'menu:threshold' }],
                     [{ text: '❌ Close', callback_data: 'menu:close' }]
@@ -141,14 +189,14 @@ export class TelegramService {
         };
         this.bot.sendMessage(chatId, text, options);
     }
-
+    
     private async showMainSettings(chatId: number, messageId: number): Promise<void> {
         const text = '⚙️ *Settings*\n\nChoose what you want to configure:';
         const options = {
             parse_mode: 'Markdown' as const,
             reply_markup: {
                 inline_keyboard: [
-                    [{ text: '📊 Tracked Pairs', callback_data: 'menu:pairs' }],
+                    [{ text: '📊 Tracked Pairs', callback_data: 'menu:pairs:0' }],
                     [{ text: '⏰ Aggregate data interval', callback_data: 'menu:interval' }],
                     [{ text: '💰 Alert Threshold', callback_data: 'menu:threshold' }],
                     [{ text: '❌ Close', callback_data: 'menu:close' }]
@@ -162,17 +210,24 @@ export class TelegramService {
         }
     }
     
-    private async showPairsSettings(chatId: number, messageId: number): Promise<void> {
+    private async showPairsSettings(chatId: number, messageId: number, page: number): Promise<void> {
         const user = await this.dbService.getUser(chatId);
         if (!user) return;
         
         const text = 'Select the pairs you want to track. Tap a coin to add or remove it from your list.';
-        const options = {
-            reply_markup: {
-                inline_keyboard: this.generatePairsKeyboard(user.trackedSymbols)
+        const keyboard = this.generatePairsKeyboard(user.trackedSymbols, page);
+        
+        try {
+            await this.bot.editMessageText(text, { 
+                chat_id: chatId, 
+                message_id: messageId, 
+                reply_markup: { inline_keyboard: keyboard }
+            });
+        } catch (error: any) {
+            if (!error.response?.body?.description?.includes('message is not modified')) {
+                console.error(`Failed to edit message for pair settings:`, error);
             }
-        };
-        await this.bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...options });
+        }
     }
 
     private async showIntervalSettings(chatId: number, messageId: number): Promise<void> {
@@ -206,11 +261,12 @@ export class TelegramService {
 
         const chatId = query.message.chat.id;
         const messageId = query.message.message_id;
-        const [action, payload] = query.data.split(':');
+        const [action, payload, pageStr] = query.data.split(':');
+        const page = parseInt(pageStr || '0', 10);
 
         if (action === 'menu') {
             if (payload === 'pairs') {
-                await this.showPairsSettings(chatId, messageId);
+                await this.showPairsSettings(chatId, messageId, page);
             } else if (payload === 'interval') {
                 await this.showIntervalSettings(chatId, messageId);
             } else if (payload === 'threshold') {
@@ -223,8 +279,18 @@ export class TelegramService {
         } else if (action === 'toggle_pair') {
             const updatedUser = await this.dbService.toggleSymbolForUser(chatId, payload);
             if (updatedUser) {
+                const newKeyboard = this.generatePairsKeyboard(updatedUser.trackedSymbols, page);
                 await this.bot.editMessageReplyMarkup({
-                    inline_keyboard: this.generatePairsKeyboard(updatedUser.trackedSymbols)
+                    inline_keyboard: newKeyboard
+                }, { chat_id: chatId, message_id: messageId });
+            }
+        } else if (action === 'set_all_pairs') {
+            const symbolsToSet = payload === 'select' ? SYMBOLS_TO_TRACK : [];
+            const updatedUser = await this.dbService.setAllSymbolsForUser(chatId, symbolsToSet);
+            if (updatedUser) {
+                const newKeyboard = this.generatePairsKeyboard(updatedUser.trackedSymbols, page);
+                await this.bot.editMessageReplyMarkup({
+                    inline_keyboard: newKeyboard
                 }, { chat_id: chatId, message_id: messageId });
             }
         } else if (action === 'set_interval') {
@@ -238,47 +304,59 @@ export class TelegramService {
 
             const updatedUser = await this.dbService.updateUserReportInterval(chatId, newInterval);
             if (updatedUser) {
-                try {
-                    await this.bot.editMessageReplyMarkup({
-                        inline_keyboard: this.generateIntervalKeyboard(updatedUser.reportIntervalHours)
-                    }, { chat_id: chatId, message_id: messageId });
-                    
-                    const explanation = `Great! You will now receive a report summarizing all liquidations every *${newInterval} hours*.`;
-                    this.bot.sendMessage(chatId, explanation, { parse_mode: 'Markdown' });
-                } catch (error: any) {
-                    if (error.response?.body?.description?.includes('message is not modified')) {
-                        console.log(`[${chatId}] Suppressed 'message not modified' error.`);
-                    } else {
-                        console.error(`[${chatId}] Failed to edit reply markup:`, error);
-                    }
-                }
+                await this.showIntervalSettings(chatId, messageId);
+                const explanation = `Great! You will now receive a report summarizing all liquidations every *${newInterval} hours*.`;
+                this.bot.sendMessage(chatId, explanation, { parse_mode: 'Markdown' });
             }
-            await this.bot.answerCallbackQuery(query.id);
-            return;
+        } else if (action === 'noop') {
+
         }
+        
         await this.bot.answerCallbackQuery(query.id);
     }
     
-    private generatePairsKeyboard(userSymbols: string[]): TelegramBot.InlineKeyboardButton[][] {
+    private generatePairsKeyboard(userSymbols: string[], page: number): TelegramBot.InlineKeyboardButton[][] {
         const keyboard: TelegramBot.InlineKeyboardButton[][] = [];
         const userSymbolsSet = new Set(userSymbols);
-        if (SYMBOLS_TO_TRACK.length > 0) {
-            for (let i = 0; i < SYMBOLS_TO_TRACK.length; i += 2) {
-                const row: TelegramBot.InlineKeyboardButton[] = [];
-                const symbol1 = SYMBOLS_TO_TRACK[i];
-                const symbol2 = SYMBOLS_TO_TRACK[i + 1];
-                if (symbol1) {
-                    const text1 = userSymbolsSet.has(symbol1) ? `✅ ${symbol1}` : symbol1;
-                    row.push({ text: text1, callback_data: `toggle_pair:${symbol1}` });
-                }
-                if (symbol2) {
-                    const text2 = userSymbolsSet.has(symbol2) ? `✅ ${symbol2}` : symbol2;
-                    row.push({ text: text2, callback_data: `toggle_pair:${symbol2}` });
-                }
-                keyboard.push(row);
+
+        const totalPages = Math.ceil(SYMBOLS_TO_TRACK.length / PAIRS_PAGE_SIZE);
+        const startIndex = page * PAIRS_PAGE_SIZE;
+        const endIndex = startIndex + PAIRS_PAGE_SIZE;
+        const pageSymbols = SYMBOLS_TO_TRACK.slice(startIndex, endIndex);
+
+        for (let i = 0; i < pageSymbols.length; i += 2) {
+            const row: TelegramBot.InlineKeyboardButton[] = [];
+            const symbol1 = pageSymbols[i];
+            const symbol2 = pageSymbols[i + 1];
+            if (symbol1) {
+                const text1 = userSymbolsSet.has(symbol1) ? `✅ ${symbol1}` : symbol1;
+                row.push({ text: text1, callback_data: `toggle_pair:${symbol1}:${page}` });
             }
+            if (symbol2) {
+                const text2 = userSymbolsSet.has(symbol2) ? `✅ ${symbol2}` : symbol2;
+                row.push({ text: text2, callback_data: `toggle_pair:${symbol2}:${page}` });
+            }
+            keyboard.push(row);
         }
-        keyboard.push([{ text: '⬅️ Back to Settings', callback_data: 'menu:settings_main' }]);
+
+        const navigationRow: TelegramBot.InlineKeyboardButton[] = [];
+        if (totalPages > 1) {
+            if (page > 0) {
+                navigationRow.push({ text: '◀️ Prev', callback_data: `menu:pairs:${page - 1}` });
+            }
+            navigationRow.push({ text: `· ${page + 1}/${totalPages} ·`, callback_data: 'noop' });
+            if (page < totalPages - 1) {
+                navigationRow.push({ text: 'Next ▶️', callback_data: `menu:pairs:${page + 1}` });
+            }
+            keyboard.push(navigationRow);
+        }
+
+        keyboard.push([
+            { text: '✅ Select All', callback_data: `set_all_pairs:select:${page}` },
+            { text: '❌ Deselect All', callback_data: `set_all_pairs:deselect:${page}` }
+        ]);
+        keyboard.push([{ text: '⬅️ Back to Settings', callback_data: 'menu:settings_main:0' }]);
+        
         return keyboard;
     }
 

@@ -71,12 +71,14 @@ export class ReportingService {
 
     private async generateReportForUser(symbols: string[]): Promise<string | null> {
         const now = new Date();
-        const currentHourStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
-        const previousHourStart = new Date(currentHourStart);
-        previousHourStart.setHours(previousHourStart.getHours() - 1);
-        
-        const currentStats = await this.getStatsForPeriod(symbols, currentHourStart, now);
-        const previousStats = await this.getStatsForPeriod(symbols, previousHourStart, currentHourStart);
+        const reportPeriodEnd = now;
+        const reportPeriodStart = new Date(now);
+        reportPeriodStart.setMinutes(reportPeriodStart.getMinutes() - 1);
+        const previousPeriodEnd = reportPeriodStart;
+        const previousPeriodStart = new Date(previousPeriodEnd);
+        previousPeriodStart.setMinutes(previousPeriodStart.getMinutes() - 1);
+        const currentStats = await this.getStatsForPeriod(symbols, reportPeriodStart, reportPeriodEnd);
+        const previousStats = await this.getStatsForPeriod(symbols, previousPeriodStart, previousPeriodEnd);
 
         if (currentStats.size === 0) {
             return null; 
@@ -103,7 +105,7 @@ export class ReportingService {
             }
         }
         
-        let finalReport = '*Hourly Liquidation Report* 📊\n_(Compared to previous hour)_\n\n';
+        let finalReport = '*Minute-by-Minute Liquidation Report* 📊\n_(Compared to previous minute)_\n\n';
 
         if (longsReport) {
             finalReport += `*🔴 LONGS*\n${longsReport}  *Subtotal: $${this.formatCurrency(totalLongsValue)}*\n\n`;

@@ -1,5 +1,5 @@
 // src/index.ts
-import 'dotenv/config'; // Загружает переменные из .env в process.env
+import 'dotenv/config';
 
 import { LiquidationListener } from './services/LiquidationListener';
 import { DatabaseService } from './services/DatabaseService';
@@ -7,7 +7,6 @@ import { TelegramService } from './services/TelegramService';
 import { ReportingService } from './services/ReportingService';
 import { SYMBOLS_TO_TRACK } from './config';
 
-// Валидация переменных окружения
 function validateEnv() {
     const requiredEnvVars = [
         'FUTURES_WS_URL',
@@ -16,9 +15,8 @@ function validateEnv() {
         'TELEGRAM_CHAT_ID',
     ];
 
-    // MONGO_URI нужен только для локального запуска, Docker предоставляет его сам
     if (process.env.NODE_ENV !== 'production') {
-        requiredEnvVars.push('MONGO_URI_LOCAL');
+        requiredEnvVars.push('MONGO_URI');
     }
 
     const missingVars = requiredEnvVars.filter(v => !process.env[v]);
@@ -28,15 +26,12 @@ function validateEnv() {
     }
 }
 
-
 async function main() {
     validateEnv();
     console.log('Application starting...');
 
-    // Определяем, какой URI для MongoDB использовать
     const mongoUri = process.env.MONGO_URI || process.env.MONGO_URI_LOCAL!;
     
-    // 1. Инициализируем сервисы с конфигурацией из process.env
     const dbService = new DatabaseService(mongoUri, process.env.MONGO_DB_NAME!);
     await dbService.connect();
 
@@ -47,7 +42,6 @@ async function main() {
     );
     listener.start();
 
-    // 2. Запускаем сервис отчетов, если он настроен
     if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID !== 'ЗАМЕНИ_НА_СВОЙ_CHAT_ID') {
         const telegramService = new TelegramService(process.env.TELEGRAM_BOT_TOKEN!);
         const reportingService = new ReportingService(

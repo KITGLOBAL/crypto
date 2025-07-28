@@ -1,7 +1,7 @@
 // src/services/ReportingService.ts
 
 import cron from 'node-cron';
-import { DatabaseService } from './DatabaseService';
+import { DatabaseService, User } from './DatabaseService';
 import { TelegramService } from './TelegramService';
 
 type LiquidationStats = {
@@ -20,23 +20,33 @@ export class ReportingService {
     }
 
     public start(): void {
-        const cronPattern = '* * * * *';
+        const cronPattern = '0 * * * *';
         console.log(`🚀 Reporting service scheduled with cron pattern: "${cronPattern}"`);
         cron.schedule(cronPattern, () => {
-            console.log('🕒 Cron job triggered: Generating reports for all users...');
-            this.generateAndSendReportsToAllUsers();
+            console.log('🕒 Cron job triggered: Checking which users need reports...');
+            this.generateAndSendReports();
         });
     }
 
-    public async generateAndSendReportsToAllUsers(): Promise<void> {
+    public async generateAndSendReports(): Promise<void> {
         const activeUsers = await this.dbService.getActiveUsers();
-        if (activeUsers.length === 0) return;
+        if (activeUsers.length === 0) {
+            console.log('No active users to report to.');
+            return;
+        }
 
-        console.log(`Found ${activeUsers.length} active users. Generating reports...`);
+        console.log(`Found ${activeUsers.length} active users. Checking schedules...`);
+        const currentHour = new Date().getHours();
+
         for (const user of activeUsers) {
-            const reportMessage = await this.generateReportForUser(user.trackedSymbols);
-            if (reportMessage) {
-                await this.telegramService.sendMessage(user.chatId, reportMessage);
+            if (currentHour % user.reportIntervalHours === 0) {
+                console.log(`[${user.chatId}] It's time for their ${user.reportIntervalHours}-hour report. Generating...`);
+                const reportMessage = await this.generateReportForUser(user, user.reportIntervalHours);
+                if (reportMessage) {
+                    await this.telegramService.sendMessage(user.chatId, reportMessage);
+                } else {
+                    console.log(`[${user.chatId}] No significant liquidations to report in the last ${user.reportIntervalHours} hours.`);
+                }
             }
         }
     }
@@ -69,16 +79,17 @@ export class ReportingService {
         return statsMap;
     }
 
-    private async generateReportForUser(symbols: string[]): Promise<string | null> {
+    private async generateReportForUser(user: User, intervalHours: number): Promise<string | null> {
         const now = new Date();
         const reportPeriodEnd = now;
-        const reportPeriodStart = new Date(now);
-        reportPeriodStart.setMinutes(reportPeriodStart.getMinutes() - 1);
-        const previousPeriodEnd = reportPeriodStart;
-        const previousPeriodStart = new Date(previousPeriodEnd);
-        previousPeriodStart.setMinutes(previousPeriodStart.getMinutes() - 1);
-        const currentStats = await this.getStatsForPeriod(symbols, reportPeriodStart, reportPeriodEnd);
-        const previousStats = await this.getStatsForPeriod(symbols, previousPeriodStart, previousPeriodEnd);
+        const reportPeriodStart = new Date(reportPeriodEnd);
+        reportPeriodStart.setHours(reportPeriodStart.getHours() - intervalHours);
+        
+        const previousPeriodStart = new Date(reportPeriodStart);
+        previousPeriodStart.setHours(previousPeriodStart.getHours() - intervalHours);
+        
+        const currentStats = await this.getStatsForPeriod(user.trackedSymbols, reportPeriodStart, reportPeriodEnd);
+        const previousStats = await this.getStatsForPeriod(user.trackedSymbols, previousPeriodStart, reportPeriodStart);
 
         if (currentStats.size === 0) {
             return null; 
@@ -105,14 +116,16 @@ export class ReportingService {
             }
         }
         
-        let finalReport = '*Minute-by-Minute Liquidation Report* 📊\n_(Compared to previous minute)_\n\n';
+        let finalReport = `*${intervalHours}-Hour Liquidation Report* 📊\n_(Compared to the previous ${intervalHours} hours)_\n\n`;
 
         if (longsReport) {
-            finalReport += `*🔴 LONGS*\n${longsReport}  *Subtotal: $${this.formatCurrency(totalLongsValue)}*\n\n`;
+            finalReport += `*🔴 LONGS LIQUIDATED*\n${longsReport}  *Subtotal: $${this.formatCurrency(totalLongsValue)}*\n\n`;
         }
         if (shortsReport) {
-            finalReport += `*🟢 SHORTS*\n${shortsReport}  *Subtotal: $${this.formatCurrency(totalShortsValue)}*\n\n`;
+            finalReport += `*🟢 SHORTS LIQUIDATED*\n${shortsReport}  *Subtotal: $${this.formatCurrency(totalShortsValue)}*\n\n`;
         }
+        
+        if (!longsReport && !shortsReport) return null;
 
         finalReport += `*OVERALL TOTAL:*\n  🔴 Longs: $${this.formatCurrency(totalLongsValue)}\n  🟢 Shorts: $${this.formatCurrency(totalShortsValue)}\n`;
 

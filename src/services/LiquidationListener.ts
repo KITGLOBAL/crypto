@@ -2,16 +2,19 @@
 
 import WebSocket from 'ws';
 import { DatabaseService, LiquidationData } from './DatabaseService';
+import { TelegramService } from './TelegramService';
 
 export class LiquidationListener {
     private symbols: string[];
     private dbService: DatabaseService;
+    private telegramService: TelegramService;
     private wsBaseUrl: string;
     private connections: Map<string, WebSocket> = new Map();
 
-    constructor(symbolsToTrack: string[], dbService: DatabaseService, wsBaseUrl: string) {
+    constructor(symbolsToTrack: string[], dbService: DatabaseService, telegramService: TelegramService, wsBaseUrl: string) {
         this.symbols = symbolsToTrack;
         this.dbService = dbService;
+        this.telegramService = telegramService;
         this.wsBaseUrl = wsBaseUrl;
         console.log('LiquidationListener initialized to permanently track symbols:', this.symbols.join(', '));
     }
@@ -51,6 +54,11 @@ export class LiquidationListener {
                     };
                     
                     this.dbService.saveLiquidation(liquidation);
+                    
+                    const value = liquidation.price * liquidation.quantity;
+                    console.log(`💾 [${liquidation.symbol}] Saved ${liquidation.side} of value $${value.toFixed(2)}`);
+
+                    this.telegramService.sendRealtimeLiquidationAlert(liquidation);
                 }
             } catch (error) {
                 console.error(`[${symbol}] Error parsing message:`, error);

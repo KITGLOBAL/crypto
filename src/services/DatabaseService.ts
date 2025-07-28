@@ -133,6 +133,18 @@ export class DatabaseService {
         return { ...user, trackedSymbols };
     }
 
+    public async toggleUserNotifications(chatId: number): Promise<User | null> {
+        const user = await this.getUser(chatId);
+        if (!user) return null;
+    
+        const newStatus = !user.notificationsEnabled;
+        const collection = this.db.collection<User>(this.usersCollectionName);
+        await collection.updateOne({ chatId }, { $set: { notificationsEnabled: newStatus } });
+        
+        console.log(`[${chatId}] Toggled real-time notifications to: ${newStatus}.`);
+        return { ...user, notificationsEnabled: newStatus };
+    }
+
     public async updateUserReportInterval(chatId: number, intervalHours: number): Promise<User | null> {
         const collection = this.db.collection<User>(this.usersCollectionName);
         await collection.updateOne({ chatId }, { $set: { reportIntervalHours: intervalHours } });

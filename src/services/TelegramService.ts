@@ -21,14 +21,54 @@ export class TelegramService {
 
     private listenForCommands(): void {
         this.bot.onText(/\/start/, this.handleStart.bind(this));
-        this.bot.onText(/\/settings|\⚙️ Settings/, this.handleSettings.bind(this));
+        this.bot.onText(/⚙️ Settings/, this.handleSettings.bind(this));
+        // A regular expression to catch both states of our new button
+        this.bot.onText(/🔇 Mute Alerts|🔊 Unmute Alerts/, this.handleMuteToggle.bind(this));
         this.bot.on('callback_query', this.handleCallbackQuery.bind(this));
         this.bot.on('message', this.handleMessage.bind(this));
     }
 
+    private generateMainMenuKeyboard(user: User): TelegramBot.ReplyKeyboardMarkup {
+        // Dynamically set the button text based on the user's notification status
+        const muteButtonText = user.notificationsEnabled ? '🔇 Mute Alerts' : '🔊 Unmute Alerts';
+        return {
+            keyboard: [
+                // New button is placed next to the Settings button
+                [{ text: muteButtonText }, { text: '⚙️ Settings' }]
+            ],
+            resize_keyboard: true,
+        };
+    }
+    
+    private async handleMuteToggle(msg: Message): Promise<void> {
+        const chatId = msg.chat.id;
+        const updatedUser = await this.dbService.toggleUserNotifications(chatId);
+
+        if (updatedUser) {
+            const newStatus = updatedUser.notificationsEnabled;
+            let confirmationMessage = '';
+
+            if (newStatus) { // Now unmuted
+                confirmationMessage = 'Silent mode is now deactivated. You will resume receiving real-time liquidation alerts.';
+            } else { // Now muted
+                confirmationMessage = 'Silent mode is now active. You will no longer receive real-time liquidation alerts, only your scheduled reports.';
+            }
+            
+            // Send the confirmation message with the updated keyboard
+            this.bot.sendMessage(chatId, confirmationMessage, {
+                reply_markup: this.generateMainMenuKeyboard(updatedUser)
+            });
+
+        } else {
+            // This case is unlikely but good to have a fallback
+            this.bot.sendMessage(chatId, "Could not find your user profile. Please try /start again.");
+        }
+    }
+
     private async handleMessage(msg: Message): Promise<void> {
         const chatId = msg.chat.id;
-        if (msg.text && (msg.text.startsWith('/') || msg.text === '⚙️ Settings')) {
+        // Ignore commands that are handled by other listeners
+        if (msg.text && (msg.text.startsWith('/') || msg.text === '⚙️ Settings' || msg.text === '🔇 Mute Alerts' || msg.text === '🔊 Unmute Alerts')) {
             return;
         }
 
@@ -50,15 +90,13 @@ export class TelegramService {
 
     private async handleStart(msg: Message): Promise<void> {
         const { id: chatId, first_name: firstName, username } = msg.chat;
-        await this.dbService.findOrCreateUser(chatId, firstName, username);
+        const user = await this.dbService.findOrCreateUser(chatId, firstName, username); //
         const displayName = firstName || 'there';
-        const welcomeMessage = `👋 Hello, ${displayName}!\n\nI am a cryptocurrency liquidations tracking bot. I will send you real-time alerts for large liquidations and periodic summary reports.\n\nUse the "Settings" button below to configure your preferences.`;
+        const welcomeMessage = `👋 Hello, ${displayName}!\n\nI am a cryptocurrency liquidations tracking bot. I will send you real-time alerts for large liquidations and periodic summary reports.\n\nUse the buttons below to configure your preferences.`;
         
+        // Send the welcome message with the new dynamic keyboard
         this.bot.sendMessage(chatId, welcomeMessage, {
-            reply_markup: {
-                keyboard: [[{ text: '⚙️ Settings' }]],
-                resize_keyboard: true,
-            }
+            reply_markup: this.generateMainMenuKeyboard(user)
         });
     }
     

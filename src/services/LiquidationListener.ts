@@ -1,40 +1,38 @@
 // src/services/LiquidationListener.ts
 
 import WebSocket from 'ws';
-import { DatabaseService } from './DatabaseService';
-
-interface LiquidationData {
-    symbol: string;
-    side: 'short liquidation' | 'long liquidation';
-    price: number;
-    quantity: number;
-    time: string;
-}
+import { DatabaseService, LiquidationData } from './DatabaseService';
 
 export class LiquidationListener {
     private symbols: string[];
     private dbService: DatabaseService;
     private wsBaseUrl: string;
+    private connections: Map<string, WebSocket> = new Map();
 
-    constructor(symbols: string[], dbService: DatabaseService, wsBaseUrl: string) {
-        this.symbols = symbols;
+    constructor(symbolsToTrack: string[], dbService: DatabaseService, wsBaseUrl: string) {
+        this.symbols = symbolsToTrack;
         this.dbService = dbService;
         this.wsBaseUrl = wsBaseUrl;
-        console.log('LiquidationListener initialized for symbols:', this.symbols.join(', '));
+        console.log('LiquidationListener initialized to permanently track symbols:', this.symbols.join(', '));
     }
 
-    public start() {
-        console.log('Starting listeners...');
+    public start(): void {
+        console.log('Starting permanent WebSocket listeners for all configured pairs...');
         this.symbols.forEach(symbol => {
             this.connect(symbol);
         });
     }
 
-    private connect(symbol: string) {
+    private connect(symbol: string): void {
+        if (this.connections.has(symbol)) {
+             return;
+        }
+
         const streamName = `${symbol.toLowerCase()}@forceOrder`;
         const wsURL = `${this.wsBaseUrl}/ws/${streamName}`;
         
         const ws = new WebSocket(wsURL);
+        this.connections.set(symbol, ws);
 
         ws.on('open', () => {
             console.log(`✅ [${symbol}] Successfully connected to WebSocket stream.`);
@@ -62,9 +60,13 @@ export class LiquidationListener {
         ws.on('error', (error) => {
             console.error(`❌ [${symbol}] WebSocket error:`, error.message);
         });
-
+        
         ws.on('close', (code, reason) => {
-            console.log(`🔌 [${symbol}] WebSocket disconnected. Code: ${code}. Reason: ${reason.toString()}. Reconnecting in 5 seconds...`);
+            const reasonString = reason.toString() || 'No reason specified';
+            console.log(`🔌 [${symbol}] WebSocket disconnected. Code: ${code}. Reason: ${reasonString}.`);
+            
+            this.connections.delete(symbol);
+            console.log(`[${symbol}] Reconnecting in 5 seconds...`);
             setTimeout(() => this.connect(symbol), 5000);
         });
     }

@@ -244,11 +244,24 @@ export class TelegramService {
         if (users.length === 0) return;
 
         const value = liquidation.price * liquidation.quantity;
+        const isLarge = value >= 500000;
+        const isWhale = value >= 1000000;
         
-        const icon = liquidation.side === 'long liquidation' ? '🔴' : '🟢';
+        let icon = '';
+        if (liquidation.side === 'long liquidation') {
+            icon = isLarge ? '🚨💀🔴' : '🔴';
+        } else {
+            icon = isLarge ? '🚀💰🟢' : '🟢';
+        }
+
         const rektType = liquidation.side === 'long liquidation' ? 'Long' : 'Short';
         const formattedValue = value >= 1000000 ? `${(value / 1000000).toFixed(2)}M` : `${(value / 1000).toFixed(0)}K`;
-        const message = `${icon} *#${liquidation.symbol} REKT ${rektType}:* $${formattedValue} at $${liquidation.price.toLocaleString('en-US')}`;
+        
+        let message = `${icon} *#${liquidation.symbol} REKT ${rektType}:* $${formattedValue} at $${liquidation.price.toLocaleString('en-US')}`;
+
+        if (isWhale) {
+            message = `🔥 *WHALE ALERT!* 🔥\n${message}`;
+        }
 
         for (const user of users) {
             if (value >= user.minLiquidationAlert) {

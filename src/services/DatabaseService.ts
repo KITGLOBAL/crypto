@@ -164,4 +164,18 @@ export class DatabaseService {
             trackedSymbols: symbol
         }).toArray();
     }
+    
+    public async deleteOldLiquidations(olderThan: Date): Promise<number> {
+        const collection = this.db.collection(this.liquidationsCollectionName);
+        try {
+            const result = await collection.deleteMany({
+                time: { $lt: olderThan.toISOString() }
+            });
+            console.log(`🧹 Successfully deleted ${result.deletedCount} old liquidation records.`);
+            return result.deletedCount;
+        } catch (error) {
+            console.error(`Failed to delete old liquidations.`, error);
+            return 0;
+        }
+    }
 }

@@ -20,12 +20,25 @@ export class ReportingService {
     }
 
     public start(): void {
-        const cronPattern = '0 * * * *';
-        console.log(`🚀 Reporting service scheduled with cron pattern: "${cronPattern}"`);
-        cron.schedule(cronPattern, () => {
+        const reportCronPattern = '0 * * * *';
+        console.log(`🚀 Reporting service scheduled with cron pattern: "${reportCronPattern}"`);
+        cron.schedule(reportCronPattern, () => {
             console.log('🕒 Cron job triggered: Checking which users need reports...');
             this.generateAndSendReports();
         });
+
+        const cleanupCronPattern = '0 0 * * *';
+        console.log(`🧹 Database cleanup service scheduled with cron pattern: "${cleanupCronPattern}"`);
+        cron.schedule(cleanupCronPattern, () => {
+            console.log('🗑️ Cron job triggered: Cleaning up old database records...');
+            this.cleanupOldData();
+        });
+    }
+
+    private async cleanupOldData(): Promise<void> {
+        const fortyEightHoursAgo = new Date();
+        fortyEightHoursAgo.setHours(fortyEightHoursAgo.getHours() - 48);
+        await this.dbService.deleteOldLiquidations(fortyEightHoursAgo);
     }
 
     public async generateAndSendReports(): Promise<void> {
@@ -105,12 +118,22 @@ export class ReportingService {
             const previous = previousStats.get(symbol) || { longs: 0, shorts: 0 };
 
             if (current.longs > 0) {
-                let trend = previous.longs > 0 ? (current.longs > previous.longs ? ' ⬆️' : ' ⬇️') : '';
+                let trend = '';
+                if (current.longs > previous.longs) {
+                    trend = ' ⬆️';
+                } else if (current.longs < previous.longs) {
+                    trend = ' ⬇️';
+                }
                 longsReport += `  ▪️ ${symbol}: $${this.formatCurrency(current.longs)}${trend}\n`;
                 totalLongsValue += current.longs;
             }
             if (current.shorts > 0) {
-                let trend = previous.shorts > 0 ? (current.shorts > previous.shorts ? ' ⬆️' : ' ⬇️') : '';
+                let trend = '';
+                if (current.shorts > previous.shorts) {
+                    trend = ' ⬆️';
+                } else if (current.shorts < previous.shorts) {
+                    trend = ' ⬇️';
+                }
                 shortsReport += `  ▪️ ${symbol}: $${this.formatCurrency(current.shorts)}${trend}\n`;
                 totalShortsValue += current.shorts;
             }

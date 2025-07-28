@@ -11,12 +11,15 @@ type LiquidationStats = {
 
 export class ReportingService {
     private dbService: DatabaseService;
-    private telegramService: TelegramService;
+    private telegramService!: TelegramService;
 
-    constructor(dbService: DatabaseService, telegramService: TelegramService) {
+    constructor(dbService: DatabaseService) {
         this.dbService = dbService;
-        this.telegramService = telegramService;
         console.log('ReportingService initialized.');
+    }
+
+    public setTelegramService(telegramService: TelegramService): void {
+        this.telegramService = telegramService;
     }
 
     public start(): void {
@@ -92,7 +95,7 @@ export class ReportingService {
         return statsMap;
     }
 
-    private async generateReportForUser(user: User, intervalHours: number): Promise<string | null> {
+    public async generateReportForUser(user: User, intervalHours: number): Promise<string | null> {
         const now = new Date();
         const reportPeriodEnd = now;
         const reportPeriodStart = new Date(reportPeriodEnd);
@@ -119,26 +122,42 @@ export class ReportingService {
 
             if (current.longs > 0) {
                 let trend = '';
-                if (current.longs > previous.longs) {
-                    trend = ' ⬆️';
-                } else if (current.longs < previous.longs) {
-                    trend = ' ⬇️';
-                }
+                if (current.longs > previous.longs) trend = ' ⬆️';
+                else if (current.longs < previous.longs) trend = ' ⬇️';
                 longsReport += `  ▪️ ${symbol}: $${this.formatCurrency(current.longs)}${trend}\n`;
                 totalLongsValue += current.longs;
             }
             if (current.shorts > 0) {
                 let trend = '';
-                if (current.shorts > previous.shorts) {
-                    trend = ' ⬆️';
-                } else if (current.shorts < previous.shorts) {
-                    trend = ' ⬇️';
-                }
+                if (current.shorts > previous.shorts) trend = ' ⬆️';
+                else if (current.shorts < previous.shorts) trend = ' ⬇️';
                 shortsReport += `  ▪️ ${symbol}: $${this.formatCurrency(current.shorts)}${trend}\n`;
                 totalShortsValue += current.shorts;
             }
         }
         
+        const getTopThree = (side: 'longs' | 'shorts') => {
+            return Array.from(currentStats.entries())
+                .filter(([, stats]) => stats[side] > 0)
+                .sort((a, b) => b[1][side] - a[1][side])
+                .slice(0, 3)
+                .map(([symbol, stats], index) => {
+                    const medals = ['🥇', '🥈', '🥉'];
+                    return `    ${medals[index]} ${symbol}: $${this.formatCurrency(stats[side])}`;
+                })
+                .join('\n');
+        };
+
+        const topLongs = getTopThree('longs');
+        const topShorts = getTopThree('shorts');
+        let topMoversReport = '';
+
+        if(topLongs || topShorts){
+            topMoversReport = '*Top rekted* 🏆\n';
+            if(topLongs) topMoversReport += `  *Top Long Liquidations:*\n${topLongs}\n`;
+            if(topShorts) topMoversReport += `  *Top Short Liquidations:*\n${topShorts}\n`;
+        }
+
         let finalReport = `*${intervalHours}-Hour Liquidation Report* 📊\n_(Compared to the previous ${intervalHours} hours)_\n\n`;
 
         if (longsReport) {
@@ -149,8 +168,12 @@ export class ReportingService {
         }
         
         if (!longsReport && !shortsReport) return null;
+        
+        finalReport += `*OVERALL TOTAL:*\n  🔴 Longs: $${this.formatCurrency(totalLongsValue)}\n  🟢 Shorts: $${this.formatCurrency(totalShortsValue)}\n\n`;
 
-        finalReport += `*OVERALL TOTAL:*\n  🔴 Longs: $${this.formatCurrency(totalLongsValue)}\n  🟢 Shorts: $${this.formatCurrency(totalShortsValue)}\n`;
+        if (topMoversReport) {
+            finalReport += `${topMoversReport}`;
+        }
 
         return finalReport;
     }

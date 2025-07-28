@@ -2,6 +2,7 @@
 
 import TelegramBot, { Message } from 'node-telegram-bot-api';
 import { DatabaseService, User, LiquidationData } from './DatabaseService';
+import { ReportingService } from './ReportingService';
 import { SYMBOLS_TO_TRACK } from '../config';
 
 type UserState = 'awaiting_threshold';
@@ -9,32 +10,52 @@ type UserState = 'awaiting_threshold';
 export class TelegramService {
     private bot: TelegramBot;
     private dbService: DatabaseService;
+    private reportingService: ReportingService;
     private readonly reportIntervals = [1, 4, 12, 24];
     private userStates: Map<number, UserState> = new Map();
 
-    constructor(token: string, dbService: DatabaseService) {
+    constructor(token: string, dbService: DatabaseService, reportingService: ReportingService) {
         this.bot = new TelegramBot(token, { polling: true });
         this.dbService = dbService;
+        this.reportingService = reportingService;
         this.listenForCommands();
         console.log('TelegramService initialized in interactive mode.');
     }
 
     private listenForCommands(): void {
         this.bot.onText(/\/start/, this.handleStart.bind(this));
+        this.bot.onText(/📢 Report Now/, this.handleReportNow.bind(this)); 
         this.bot.onText(/⚙️ Settings/, this.handleSettings.bind(this));
-        // A regular expression to catch both states of our new button
         this.bot.onText(/🔇 Mute Alerts|🔊 Unmute Alerts/, this.handleMuteToggle.bind(this));
         this.bot.on('callback_query', this.handleCallbackQuery.bind(this));
         this.bot.on('message', this.handleMessage.bind(this));
     }
 
+    private async handleReportNow(msg: Message): Promise<void> {
+        const chatId = msg.chat.id;
+        const user = await this.dbService.getUser(chatId);
+    
+        if (!user) {
+            this.bot.sendMessage(chatId, 'Please run /start first.');
+            return;
+        }
+    
+        await this.bot.sendMessage(chatId, 'Generating your report, please wait...');
+    
+        const reportMessage = await this.reportingService.generateReportForUser(user, user.reportIntervalHours);
+    
+        if (reportMessage) {
+            await this.sendMessage(chatId, reportMessage);
+        } else {
+            await this.sendMessage(chatId, `No significant liquidations to report for you in the last ${user.reportIntervalHours} hours.`);
+        }
+    }
+
     private generateMainMenuKeyboard(user: User): TelegramBot.ReplyKeyboardMarkup {
-        // Dynamically set the button text based on the user's notification status
         const muteButtonText = user.notificationsEnabled ? '🔇 Mute Alerts' : '🔊 Unmute Alerts';
         return {
             keyboard: [
-                // New button is placed next to the Settings button
-                [{ text: muteButtonText }, { text: '⚙️ Settings' }]
+                [{ text: '📢 Report Now' }, { text: muteButtonText }, { text: '⚙️ Settings' }]
             ],
             resize_keyboard: true,
         };
@@ -48,28 +69,27 @@ export class TelegramService {
             const newStatus = updatedUser.notificationsEnabled;
             let confirmationMessage = '';
 
-            if (newStatus) { // Now unmuted
+            if (newStatus) { 
                 confirmationMessage = 'Silent mode is now deactivated. You will resume receiving real-time liquidation alerts.';
-            } else { // Now muted
+            } else {
                 confirmationMessage = 'Silent mode is now active. You will no longer receive real-time liquidation alerts, only your scheduled reports.';
             }
             
-            // Send the confirmation message with the updated keyboard
             this.bot.sendMessage(chatId, confirmationMessage, {
                 reply_markup: this.generateMainMenuKeyboard(updatedUser)
             });
 
         } else {
-            // This case is unlikely but good to have a fallback
             this.bot.sendMessage(chatId, "Could not find your user profile. Please try /start again.");
         }
     }
 
     private async handleMessage(msg: Message): Promise<void> {
         const chatId = msg.chat.id;
-        // Ignore commands that are handled by other listeners
-        if (msg.text && (msg.text.startsWith('/') || msg.text === '⚙️ Settings' || msg.text === '🔇 Mute Alerts' || msg.text === '🔊 Unmute Alerts')) {
-            return;
+        if (msg.text) {
+            const commandText = msg.text;
+            const handledCommands = ['/start', '📢 Report Now', '⚙️ Settings', '🔇 Mute Alerts', '🔊 Unmute Alerts'];
+            if(handledCommands.includes(commandText)) return;
         }
 
         const currentState = this.userStates.get(chatId);
@@ -90,11 +110,10 @@ export class TelegramService {
 
     private async handleStart(msg: Message): Promise<void> {
         const { id: chatId, first_name: firstName, username } = msg.chat;
-        const user = await this.dbService.findOrCreateUser(chatId, firstName, username); //
+        const user = await this.dbService.findOrCreateUser(chatId, firstName, username); 
         const displayName = firstName || 'there';
         const welcomeMessage = `👋 Hello, ${displayName}!\n\nI am a cryptocurrency liquidations tracking bot. I will send you real-time alerts for large liquidations and periodic summary reports.\n\nUse the buttons below to configure your preferences.`;
         
-        // Send the welcome message with the new dynamic keyboard
         this.bot.sendMessage(chatId, welcomeMessage, {
             reply_markup: this.generateMainMenuKeyboard(user)
         });

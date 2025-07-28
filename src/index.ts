@@ -26,20 +26,24 @@ async function main() {
     const dbService = new DatabaseService(process.env.MONGO_URI!, process.env.MONGO_DB_NAME!);
     await dbService.connect();
 
+    const reportingService = new ReportingService(dbService);
+    
     const telegramService = new TelegramService(
         process.env.TELEGRAM_BOT_TOKEN!, 
-        dbService
+        dbService,
+        reportingService
     );
     
+    reportingService.setTelegramService(telegramService);
+
     const listener = new LiquidationListener(
         SYMBOLS_TO_TRACK,
         dbService,
         telegramService,
         process.env.FUTURES_WS_URL!
     );
+
     listener.start();
-    
-    const reportingService = new ReportingService(dbService, telegramService);
     reportingService.start();
 
     console.log('✅ Application successfully started and all services are running.');

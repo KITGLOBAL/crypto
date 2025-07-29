@@ -107,11 +107,11 @@ public async generateLiquidityMap(symbol: string): Promise<Buffer | null> {
     } else if (symbol === 'ETHUSDT') {
         console.log(`[${symbol}] Applying ETH-specific logic.`);
         aggregation = symbolInfo.tickSize * 60;
-        priceRange = 0.2;
+        priceRange = 1;
         minVolumeThreshold = 2000;
     } else {
         console.log(`[${symbol}] Applying altcoin-specific logic.`);
-        aggregation = symbolInfo.tickSize * 33;
+        aggregation = symbolInfo.tickSize * 53;
         priceRange = 0.20; 
         minVolumeThreshold = 500;
     }

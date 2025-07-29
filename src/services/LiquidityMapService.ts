@@ -1,5 +1,3 @@
-// src/services/LiquidityMapService.ts
-
 import { ChartJSNodeCanvas } from 'chartjs-node-canvas';
 import { ChartConfiguration, Plugin, ChartTypeRegistry } from 'chart.js';
 import AnnotationPlugin, { AnnotationOptions } from 'chartjs-plugin-annotation';
@@ -9,15 +7,27 @@ type LiquidityLevel = { price: number; volume: number; };
 type ClusteredLevel = { price: number; totalVolume: number; count: number };
 type SymbolInfo = { tickSize: number; };
 
+
+const CHART_WIDTH = 1400;
+const CHART_HEIGHT = 1000;
+const BACKGROUND_COLOR = '#1E222D';
+const TOP_LEVELS_COUNT = 3; // Количество топовых зон для отображения с пунктиром
+const COLOR_LONG = 'rgba(38, 166, 154, 0.25)'; // Бледный цвет для лонгов
+const COLOR_LONG_TOP = 'rgba(38, 166, 154, 0.9)'; // Яркий цвет для топ-лонгов
+const COLOR_SHORT = 'rgba(239, 83, 80, 0.25)'; // Бледный цвет для шортов
+const COLOR_SHORT_TOP = 'rgba(239, 83, 80, 0.9)'; // Яркий цвет для топ-шортов
+const ANNOTATION_COLOR = '#FFD700'; // Цвет для пунктирных линий и аннотаций
+const MID_PRICE_COLOR = '#FFD700'; // Цвет для линии средней цены
+
 export class LiquidityMapService {
-    private readonly chartWidth = 1400;
-    private readonly chartHeight = 1000;
     private readonly chartJSNodeCanvas: ChartJSNodeCanvas;
     private symbolInfoCache = new Map<string, SymbolInfo>();
 
     constructor() {
         this.chartJSNodeCanvas = new ChartJSNodeCanvas({
-            width: this.chartWidth, height: this.chartHeight, backgroundColour: '#1E222D',
+            width: CHART_WIDTH,
+            height: CHART_HEIGHT,
+            backgroundColour: BACKGROUND_COLOR,
             plugins: { modern: [AnnotationPlugin] }
         });
         console.log('LiquidityMapService initialized with asset-specific logic.');
@@ -58,7 +68,7 @@ export class LiquidityMapService {
             return null;
         }
     }
-    
+
     private analyzeLiquidity(books: (OrderBookData | null)[], aggregation: number): { longs: LiquidityLevel[], shorts: LiquidityLevel[] } {
         const longsMap = new Map<number, number>();
         const shortsMap = new Map<number, number>();
@@ -75,18 +85,18 @@ export class LiquidityMapService {
                 shortsMap.set(Math.ceil(price / aggregation) * aggregation, (shortsMap.get(Math.ceil(price / aggregation) * aggregation) || 0) + volume);
             }
         }
-        return { 
+        return {
             longs: Array.from(longsMap.entries()).map(([price, volume]) => ({ price, volume })),
             shorts: Array.from(shortsMap.entries()).map(([price, volume]) => ({ price, volume }))
         };
     }
-    
+
+ 
     private clusterLevels(levels: LiquidityLevel[], minDistance: number): ClusteredLevel[] {
         if (levels.length === 0) return [];
 
         const sortedLevels = [...levels].sort((a, b) => a.price - b.price);
         const clustered: ClusteredLevel[] = [];
-
         let currentCluster = {
             totalVolume: sortedLevels[0].volume,
             priceWithMaxVolume: sortedLevels[0].price,
@@ -105,7 +115,7 @@ export class LiquidityMapService {
                 }
             } else {
                 if (currentCluster.levels.length > 0) {
-                     clustered.push({
+                    clustered.push({
                         price: currentCluster.priceWithMaxVolume,
                         totalVolume: currentCluster.totalVolume,
                         count: currentCluster.levels.length
@@ -114,7 +124,7 @@ export class LiquidityMapService {
                 currentCluster = { totalVolume: level.volume, priceWithMaxVolume: level.price, levels: [level] };
             }
         }
-        
+
         clustered.push({
             price: currentCluster.priceWithMaxVolume,
             totalVolume: currentCluster.totalVolume,
@@ -124,33 +134,68 @@ export class LiquidityMapService {
         return clustered;
     }
 
+    private getTopLevels(levels: ClusteredLevel[], count: number): ClusteredLevel[] {
+        return [...levels].sort((a, b) => b.totalVolume - a.totalVolume).slice(0, count);
+    }
+
+    private createAnnotation(level: ClusteredLevel, totalVolume: number): AnnotationOptions {
+        const volumePercentage = totalVolume > 0 ? ((level.totalVolume / totalVolume) * 100).toFixed(1) : '0.0';
+        return {
+            type: 'line',
+            yMin: level.price,
+            yMax: level.price,
+            borderColor: ANNOTATION_COLOR,
+            borderWidth: 1.5,
+            borderDash: [5, 5],
+            label: {
+                content: `Σ $${(level.totalVolume / 1000000).toFixed(1)}M (${level.count} levels, ${volumePercentage}%)`,
+                display: true,
+                position: 'end',
+                backgroundColor: 'rgba(0,0,0,0.6)',
+                font: { size: 12 },
+                color: ANNOTATION_COLOR
+            }
+        };
+    }
+
+
     public async generateLiquidityMap(symbol: string): Promise<Buffer | null> {
         console.log(`[${symbol}] Generating aggregated futures liquidity map...`);
-        
+
+
         const [symbolInfo, binanceBook, bybitBook] = await Promise.all([
-            this.getSymbolInfo(symbol), this.fetchOrderBook(symbol, 'binance'), this.fetchOrderBook(symbol, 'bybit'),
+            this.getSymbolInfo(symbol),
+            this.fetchOrderBook(symbol, 'binance'),
+            this.fetchOrderBook(symbol, 'bybit'),
         ]);
 
-        if (!symbolInfo || (!binanceBook && !bybitBook)) return null;
-        
+        if (!symbolInfo || (!binanceBook && !bybitBook)) {
+            console.error(`[${symbol}] Failed to fetch symbol info or order books`);
+            return null;
+        }
+
         const books = [binanceBook, bybitBook];
         const validBook = books.find(b => b && b.bids.length > 0 && b.asks.length > 0);
-        if (!validBook) return null;
+        if (!validBook) {
+            console.error(`[${symbol}] No valid order book data found`);
+            return null;
+        }
+
 
         const midPrice = (parseFloat(validBook.bids[0][0]) + parseFloat(validBook.asks[0][0])) / 2;
 
         let aggregation: number;
         let minVolumeThreshold: number;
         let clusterDistance: number;
-        
+
         if (symbol === 'BTCUSDT') {
             aggregation = symbolInfo.tickSize * 150;
-            minVolumeThreshold = 1000;
-            clusterDistance = 0.001; 
+            minVolumeThreshold = 500;
+            clusterDistance = 0.0001;
         } else if (symbol === 'ETHUSDT') {
             aggregation = symbolInfo.tickSize * 120;
-            minVolumeThreshold = 2000;
-            clusterDistance = 0.0015;
+            minVolumeThreshold = 500;
+            clusterDistance = 0.00015;
         } else {
             aggregation = symbolInfo.tickSize * 100;
             minVolumeThreshold = 500;
@@ -159,21 +204,20 @@ export class LiquidityMapService {
 
 
         const { longs, shorts } = this.analyzeLiquidity(books, aggregation);
-
         const filterAndSort = (levels: LiquidityLevel[]) => levels
             .filter(l => l.volume > minVolumeThreshold)
             .sort((a, b) => a.price - b.price);
 
         const longsData = filterAndSort(longs);
         const shortsData = filterAndSort(shorts);
-        
         const clusteredLongs = this.clusterLevels(longsData, clusterDistance);
         const clusteredShorts = this.clusterLevels(shortsData, clusterDistance);
-        
+
+
         const totalLongsVolume = clusteredLongs.reduce((sum, l) => sum + l.totalVolume, 0);
         const totalShortsVolume = clusteredShorts.reduce((sum, l) => sum + l.totalVolume, 0);
         const totalVolume = totalLongsVolume + totalShortsVolume;
-        
+
         let dominanceText = '';
         if (totalVolume > 0) {
             const longDominance = (totalLongsVolume / totalVolume) * 100;
@@ -183,44 +227,26 @@ export class LiquidityMapService {
                 dominanceText = `(Seller Dominance: ${(100 - longDominance).toFixed(0)}%)`;
             }
         }
-        
-    
-        const getTopLevels = (levels: LiquidityLevel[], count = 3) => {
-            return [...levels].sort((a, b) => b.volume - a.volume).slice(0, count).map(l => l.price);
-        };
 
-        const topLongPrices = getTopLevels(longsData);
-        const topShortPrices = getTopLevels(shortsData);
+        const topLongs = this.getTopLevels(clusteredLongs, TOP_LEVELS_COUNT);
+        const topShorts = this.getTopLevels(clusteredShorts, TOP_LEVELS_COUNT);
+        const topLongPrices = topLongs.map(l => l.price);
+        const topShortPrices = topShorts.map(l => l.price);
 
         const getColor = (price: number, topPrices: number[], type: 'long' | 'short') => {
             const isTop = topPrices.includes(price);
             if (type === 'long') {
-                return isTop ? 'rgba(38, 166, 154, 0.9)' : 'rgba(38, 166, 154, 0.25)'; 
+                return isTop ? COLOR_LONG_TOP : COLOR_LONG;
             } else {
-                return isTop ? 'rgba(239, 83, 80, 0.9)' : 'rgba(239, 83, 80, 0.25)'; 
+                return isTop ? COLOR_SHORT_TOP : COLOR_SHORT;
             }
         };
 
-        const createAnnotation = (level: ClusteredLevel): AnnotationOptions => {
-            return {
-                type: 'line',
-                yMin: level.price,
-                yMax: level.price,
-                borderColor: '#FFD700',
-                borderWidth: 1.5,
-                borderDash: [5, 5],
-                label: {
-                    content: `Σ $${(level.totalVolume / 1000000).toFixed(1)}M (${level.count} levels)`,
-                    display: true,
-                    position: 'end',
-                    backgroundColor: 'rgba(0,0,0,0.6)',
-                    font: { size: 12 },
-                    color: '#FFD700'
-                }
-            };
-        };
+        const significantAnnotations = [
+            ...topLongs.map(level => this.createAnnotation(level, totalVolume)),
+            ...topShorts.map(level => this.createAnnotation(level, totalVolume))
+        ];
 
-        const significantAnnotations = [...clusteredLongs, ...clusteredShorts].map(createAnnotation);
 
         const midPriceLine: Plugin<keyof ChartTypeRegistry> = {
             id: 'midPriceLine',
@@ -232,16 +258,17 @@ export class LiquidityMapService {
                 ctx.beginPath();
                 ctx.moveTo(chart.chartArea.left, yValue);
                 ctx.lineTo(chart.chartArea.right, yValue);
-                ctx.strokeStyle = '#FFD700';
+                ctx.strokeStyle = MID_PRICE_COLOR;
                 ctx.lineWidth = 2;
                 ctx.stroke();
-                ctx.fillStyle = '#FFD700';
-                ctx.font = 'bold 14px sans-serif';
+                ctx.fillStyle = MID_PRICE_COLOR;
+                ctx.font = 'bold 10px sans-serif';
                 ctx.textAlign = 'left';
                 ctx.fillText(midPrice.toFixed(midPrice < 1 ? 4 : 2), 10, yValue - 5);
                 ctx.restore();
             }
         };
+
 
         const allPricesFromBooks = [...(binanceBook?.bids || []), ...(binanceBook?.asks || []), ...(bybitBook?.bids || []), ...(bybitBook?.asks || [])]
             .map(([price]) => parseFloat(price));
@@ -251,17 +278,18 @@ export class LiquidityMapService {
         const yMin = midPrice - dynamicPriceRange / 2;
         const yMax = midPrice + dynamicPriceRange / 2;
 
+  
         const configuration: ChartConfiguration = {
             type: 'bar',
             data: {
                 datasets: [
-                    { 
-                        label: 'Longs (Buy Walls)', 
-                        data: longsData.map(l => ({ y: l.price, x: l.volume })), 
+                    {
+                        label: 'Longs (Buy Walls)',
+                        data: longsData.map(l => ({ y: l.price, x: l.volume })),
                         backgroundColor: longsData.map(l => getColor(l.price, topLongPrices, 'long'))
                     },
-                    { 
-                        label: 'Shorts (Sell Walls)', 
+                    {
+                        label: 'Shorts (Sell Walls)',
                         data: shortsData.map(l => ({ y: l.price, x: l.volume })),
                         backgroundColor: shortsData.map(l => getColor(l.price, topShortPrices, 'short'))
                     }
@@ -272,26 +300,46 @@ export class LiquidityMapService {
                 responsive: false,
                 maintainAspectRatio: false,
                 plugins: {
-                    title: { display: true, text: [`Futures Liquidity Map for ${symbol.toUpperCase()} (Binance + Bybit)`, dominanceText], color: '#FFFFFF', font: { size: 20 } },
+            title: {
+                display: true,
+                text: [`Futures Liquidity Map for ${symbol.toUpperCase()} (Binance + Bybit) [Total Volume: $${(totalVolume / 1000000).toFixed(1)}M]`, dominanceText],
+                color: '#FFFFFF',
+                font: { size: 20 }
+            },
                     legend: { position: 'top', labels: { color: '#FFFFFF' } },
                     annotation: { annotations: significantAnnotations },
                     tooltip: {
-                         callbacks: {
+                        callbacks: {
                             label: (context) => {
                                 const side = context.dataset.label || '';
                                 const value = context.parsed.x;
-                                return `${side}: ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value)}`;
+                                const price = context.parsed.y;
+                                return `${side}: $${(value / 1000000).toFixed(1)}M @ ${price.toFixed(2)}`;
                             }
                         }
                     }
                 },
                 scales: {
-                    x: { type: 'logarithmic', title: { display: true, text: 'Volume (USD, Logarithmic Scale)', color: '#FFFFFF'}, ticks: { color: '#B0B3B8', callback: (value) => {const num = Number(value); if (num >= 1000000) return `${(num / 1000000).toFixed(0)}M`; if (num >= 1000) return `${(num / 1000).toFixed(0)}K`; return num.toString();}}},
-                    y: { 
-                        type: 'linear', reverse: false, title: { display: true, text: 'Price (USD)', color: '#FFFFFF' },
+                    x: {
+                        type: 'logarithmic',
+                        title: { display: true, text: 'Volume (USD, Logarithmic Scale)', color: '#FFFFFF' },
+                        ticks: {
+                            color: '#B0B3B8',
+                            callback: (value) => {
+                                const num = Number(value);
+                                if (num >= 1000000) return `${(num / 1000000).toFixed(0)}M`;
+                                if (num >= 1000) return `${(num / 1000).toFixed(0)}K`;
+                                return num.toString();
+                            }
+                        }
+                    },
+                    y: {
+                        type: 'linear',
+                        reverse: false,
+                        title: { display: true, text: 'Price (USD)', color: '#FFFFFF' },
                         min: yMin,
                         max: yMax
-                    },
+                    }
                 }
             },
             plugins: [midPriceLine, AnnotationPlugin]

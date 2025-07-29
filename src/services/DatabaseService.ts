@@ -150,15 +150,16 @@ export class DatabaseService {
         return updatedUser;
     }
 
-    public async toggleUserNotifications(chatId: number): Promise<User | null> {
+    public async toggleUserNotifications(chatId: number, forceState?: boolean): Promise<User | null> {
         const user = await this.getUser(chatId);
         if (!user) return null;
     
-        const newStatus = !user.notificationsEnabled;
+        const newStatus = typeof forceState === 'boolean' ? forceState : !user.notificationsEnabled;
+        
         const collection = this.db.collection<User>(this.usersCollectionName);
         await collection.updateOne({ chatId }, { $set: { notificationsEnabled: newStatus } });
         
-        console.log(`[${chatId}] Toggled real-time notifications to: ${newStatus}.`);
+        console.log(`[${chatId}] Set real-time notifications to: ${newStatus}.`);
         return { ...user, notificationsEnabled: newStatus };
     }
 

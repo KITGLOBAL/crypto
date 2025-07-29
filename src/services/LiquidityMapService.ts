@@ -101,19 +101,19 @@ public async generateLiquidityMap(symbol: string): Promise<Buffer | null> {
 
     if (symbol === 'BTCUSDT') {
         console.log(`[${symbol}] Applying BTC-specific logic.`);
-        aggregation = symbolInfo.tickSize * 70;
+        aggregation = symbolInfo.tickSize * 60;
         priceRange = 0.02;
         minVolumeThreshold = 1000;
     } else if (symbol === 'ETHUSDT') {
         console.log(`[${symbol}] Applying ETH-specific logic.`);
-        aggregation = symbolInfo.tickSize * 70;
+        aggregation = symbolInfo.tickSize * 60;
         priceRange = 0.2;
         minVolumeThreshold = 2000;
     } else {
         console.log(`[${symbol}] Applying altcoin-specific logic.`);
-        aggregation = symbolInfo.tickSize * 50;
-        priceRange = 0.15; 
-        minVolumeThreshold = 2000;
+        aggregation = symbolInfo.tickSize * 33;
+        priceRange = 0.20; 
+        minVolumeThreshold = 500;
     }
     const { longs, shorts } = this.analyzeLiquidity(books, aggregation);
 

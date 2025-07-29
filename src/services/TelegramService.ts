@@ -37,7 +37,7 @@ export class TelegramService {
         this.bot.onText(/📢 Report Now/, this.handleReportNow.bind(this));
         this.bot.onText(/📊 Market Stats/, this.handleMarketStats.bind(this));
         this.bot.onText(/🗺️ Liquidity Map/, this.handleShowMapSelection.bind(this));
-        this.bot.onText(/📊 Tracked Pairs/, this.handleTrackedPairs.bind(this));
+        this.bot.onText(/💸 Tracked Pairs/, this.handleTrackedPairs.bind(this));
         this.bot.onText(/⚙️ Settings/, this.handleSettings.bind(this));
         this.bot.on('callback_query', this.handleCallbackQuery.bind(this));
         this.bot.on('message', this.handleMessage.bind(this));
@@ -65,7 +65,22 @@ export class TelegramService {
             const imageBuffer = await this.liquidityMapService.generateLiquidityMap(symbol);
 
             if (imageBuffer) {
-                const caption = `🗺️ *Liquidity Map for ${symbol}*\n\nThis chart shows significant order book depth from Binance & Bybit, highlighting potential support (🟢) and resistance (🔴) zones. Larger bars indicate a higher concentration of orders.`;
+        const caption = `🗺️ *Liquidity Map for ${symbol}*
+
+        This map highlights key order book zones from Binance and Bybit — showing where big buy (🟢) and sell (🔴) walls are stacked.
+
+        🟢 = Potential *support* (lots of buy orders)  
+        🔴 = Potential *resistance* (lots of sell orders)  
+
+        The wider the bar, the more liquidity at that price 💸
+
+        📊 *Pressure Ratio* = Longs Volume / Shorts Volume:
+        - **> 1.0** → More long positions — buying pressure is stronger 🟩  
+        - **< 1.0** → More shorts — selling pressure dominates 🟥  
+        - **= 1.0** → Balanced market ⚖️
+
+        Use this to spot possible bounce zones or breakout levels. Timing is everything ⏱️📈`;
+
                 await this.bot.sendPhoto(chatId, imageBuffer, {
                     caption: caption,
                     parse_mode: 'Markdown'
@@ -180,7 +195,7 @@ export class TelegramService {
         return {
             keyboard: [
                 [{ text: '📢 Report Now' }, { text: '📊 Market Stats'}],
-                [{ text: '🗺️ Liquidity Map' }, { text: '📊 Tracked Pairs' }],
+                [{ text: '🗺️ Liquidity Map' }, { text: '💸 Tracked Pairs' }],
                 [{ text: '⚙️ Settings' }]
             ],
             resize_keyboard: true,
@@ -191,7 +206,7 @@ export class TelegramService {
         const chatId = msg.chat.id;
         if (msg.text) {
             const commandText = msg.text;
-            const handledCommands = ['/start', '📢 Report Now', '📊 Market Stats', '🗺️ Liquidity Map', '📊 Tracked Pairs', '⚙️ Settings'];
+            const handledCommands = ['/start', '📢 Report Now', '📊 Market Stats', '🗺️ Liquidity Map', '💸 Tracked Pairs', '⚙️ Settings'];
             if(handledCommands.includes(commandText) || commandText.startsWith('/map')) return;
         }
 

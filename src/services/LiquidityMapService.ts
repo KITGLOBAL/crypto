@@ -19,7 +19,7 @@ export class LiquidityMapService {
             width: this.chartWidth, height: this.chartHeight, backgroundColour: '#1E222D',
             plugins: { modern: [AnnotationPlugin] }
         });
-        console.log('LiquidityMapService initialized with dynamic coloring and range.');
+        console.log('LiquidityMapService initialized with asset-specific logic.');
     }
 
     private async getSymbolInfo(symbol: string): Promise<SymbolInfo | null> {
@@ -45,7 +45,7 @@ export class LiquidityMapService {
     private async fetchOrderBook(symbol: string, exchange: 'binance' | 'bybit'): Promise<OrderBookData | null> {
         try {
             const url = exchange === 'binance'
-                ? `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol.toUpperCase()}&limit=1000`
+                ? `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol.toUpperCase()}&limit=500`
                 : `https://api.bybit.com/v5/market/orderbook?category=linear&symbol=${symbol.toUpperCase()}&limit=500`;
             const response = await fetch(url);
             if (!response.ok) return null;
@@ -80,118 +80,152 @@ export class LiquidityMapService {
         };
     }
 
-    public async generateLiquidityMap(symbol: string): Promise<Buffer | null> {
-        console.log(`[${symbol}] Generating aggregated futures liquidity map...`);
-        
-        const [symbolInfo, binanceBook, bybitBook] = await Promise.all([
-            this.getSymbolInfo(symbol), this.fetchOrderBook(symbol, 'binance'), this.fetchOrderBook(symbol, 'bybit'),
-        ]);
+public async generateLiquidityMap(symbol: string): Promise<Buffer | null> {
+    console.log(`[${symbol}] Generating aggregated futures liquidity map...`);
+    
+    const [symbolInfo, binanceBook, bybitBook] = await Promise.all([
+        this.getSymbolInfo(symbol), this.fetchOrderBook(symbol, 'binance'), this.fetchOrderBook(symbol, 'bybit'),
+    ]);
 
-        if (!symbolInfo || (!binanceBook && !bybitBook)) return null;
-        
-        const books = [binanceBook, bybitBook];
-        const validBook = books.find(b => b && b.bids.length > 0 && b.asks.length > 0);
-        if (!validBook) return null;
+    if (!symbolInfo || (!binanceBook && !bybitBook)) return null;
+    
+    const books = [binanceBook, bybitBook];
+    const validBook = books.find(b => b && b.bids.length > 0 && b.asks.length > 0);
+    if (!validBook) return null;
 
-        const midPrice = (parseFloat(validBook.bids[0][0]) + parseFloat(validBook.asks[0][0])) / 2;
-        const aggregation = symbolInfo.tickSize * (midPrice > 1000 ? 100 : 50);
-        const { longs, shorts } = this.analyzeLiquidity(books, aggregation);
-        
-        const minVolumeThreshold = 2000;
-        const priceRange = 0.08;
+    const midPrice = (parseFloat(validBook.bids[0][0]) + parseFloat(validBook.asks[0][0])) / 2;
 
-        const filterAndSort = (levels: LiquidityLevel[]) => levels
-            .filter(l => l.volume > minVolumeThreshold)
-            .sort((a, b) => a.price - b.price);
+    let aggregation: number;
+    let priceRange: number;
+    let minVolumeThreshold: number;
 
-        const longsData = filterAndSort(longs);
-        const shortsData = filterAndSort(shorts);
+    if (symbol === 'BTCUSDT') {
+        console.log(`[${symbol}] Applying BTC-specific logic.`);
+        aggregation = symbolInfo.tickSize * 70;
+        priceRange = 0.02;
+        minVolumeThreshold = 1000;
+    } else if (symbol === 'ETHUSDT') {
+        console.log(`[${symbol}] Applying ETH-specific logic.`);
+        aggregation = symbolInfo.tickSize * 70;
+        priceRange = 0.2;
+        minVolumeThreshold = 2000;
+    } else {
+        console.log(`[${symbol}] Applying altcoin-specific logic.`);
+        aggregation = symbolInfo.tickSize * 50;
+        priceRange = 0.15; 
+        minVolumeThreshold = 2000;
+    }
+    const { longs, shorts } = this.analyzeLiquidity(books, aggregation);
 
-        const maxLongVolume = Math.max(...longsData.map(l => l.volume), 0);
-        const maxShortVolume = Math.max(...shortsData.map(l => l.volume), 0);
+    console.log(`[Binance] Bids length: ${binanceBook?.bids.length}, Asks length: ${binanceBook?.asks.length}, Status OK: ${binanceBook !== null}`);
+    console.log(`[Bybit] Bids length: ${bybitBook?.bids.length}, Asks length: ${bybitBook?.asks.length}`);
+    const allPrices = [...(binanceBook?.bids || []), ...(binanceBook?.asks || []), ...(bybitBook?.bids || []), ...(bybitBook?.asks || [])]
+        .map(([price]) => parseFloat(price));
+    console.log(`Min Price: ${Math.min(...allPrices)}, Max Price: ${Math.max(...allPrices)}`);
 
-        const getDynamicColor = (volume: number, maxVolume: number, type: 'long' | 'short'): string => {
-            if (maxVolume === 0) return type === 'long' ? 'rgba(38, 166, 154, 0.7)' : 'rgba(239, 83, 80, 0.7)';
-            const intensity = 0.3 + 0.7 * (volume / maxVolume);
-            return type === 'long' ? `rgba(38, 166, 154, ${intensity})` : `rgba(239, 83, 80, ${intensity})`;
-        };
+    const filterAndSort = (levels: LiquidityLevel[]) => levels
+        .filter(l => l.volume > minVolumeThreshold)
+        .sort((a, b) => a.price - b.price);
 
-        const significantVolume = (maxLongVolume + maxShortVolume) / 4;
-        const significantAnnotations: AnnotationOptions[] = [...longsData, ...shortsData]
-            .filter(l => l.volume > significantVolume)
-            .map((l): AnnotationOptions => ({
-                type: 'line', yMin: l.price, yMax: l.price, borderColor: '#FFD700', borderWidth: 1, borderDash: [5, 5],
-                label: { 
-                    content: `$${(l.volume / 1000000).toFixed(1)}M`, 
-                    display: true, 
-                    position: 'end', 
-                    backgroundColor: 'rgba(0,0,0,0.6)', 
-                    font: { size: 12 }, 
-                    color: '#FFD700'
-                }
-            }));
+    const longsData = filterAndSort(longs);
+    const shortsData = filterAndSort(shorts);
 
-        const midPriceLine: Plugin<keyof ChartTypeRegistry> = {
-            id: 'midPriceLine',
-            afterDraw: (chart) => {
-                const ctx = chart.ctx;
-                const yAxis = chart.scales.y;
-                const yValue = yAxis.getPixelForValue(midPrice);
-                ctx.save();
-                ctx.beginPath();
-                ctx.moveTo(chart.chartArea.left, yValue);
-                ctx.lineTo(chart.chartArea.right, yValue);
-                ctx.strokeStyle = '#FFD700';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-                ctx.fillStyle = '#FFD700';
-                ctx.font = 'bold 14px sans-serif';
-                ctx.textAlign = 'right';
-                ctx.fillText(midPrice.toFixed(midPrice < 1 ? 4 : 2), chart.chartArea.right - 5, yValue - 5);
-                ctx.restore();
+    console.log(`Longs Data: ${longsData.length} levels, Sample:`, longsData.slice(0, 5));
+    console.log(`Shorts Data: ${shortsData.length} levels, Sample:`, shortsData.slice(0, 5));
+
+    const maxLongVolume = Math.max(...longsData.map(l => l.volume), 0);
+    const maxShortVolume = Math.max(...shortsData.map(l => l.volume), 0);
+
+    const getDynamicColor = (volume: number, maxVolume: number, type: 'long' | 'short'): string => {
+        if (maxVolume === 0) return type === 'long' ? 'rgba(38, 166, 154, 0.7)' : 'rgba(239, 83, 80, 0.7)';
+        const intensity = 0.3 + 0.7 * (volume / maxVolume);
+        return type === 'long' ? `rgba(38, 166, 154, ${intensity})` : `rgba(239, 83, 80, ${intensity})`;
+    };
+
+    const significantVolume = (maxLongVolume + maxShortVolume) / 4;
+    const significantAnnotations: AnnotationOptions[] = [...longsData, ...shortsData]
+        .filter(l => l.volume > significantVolume)
+        .map((l): AnnotationOptions => ({
+            type: 'line', yMin: l.price, yMax: l.price, borderColor: '#FFD700', borderWidth: 1, borderDash: [5, 5],
+            label: { 
+                content: `$${(l.volume / 1000000).toFixed(1)}M`, 
+                display: true, 
+                position: 'end', 
+                backgroundColor: 'rgba(0,0,0,0.6)', 
+                font: { size: 12 }, 
+                color: '#FFD700'
             }
-        };
+        }));
 
-        const configuration: ChartConfiguration = {
-            type: 'bar',
-            data: {
-                datasets: [
-                    { label: 'Longs (Buy Walls)', data: longsData.map(l => ({ y: l.price, x: l.volume })), 
-                      backgroundColor: longsData.map(l => getDynamicColor(l.volume, maxLongVolume, 'long')) },
-                    { label: 'Shorts (Sell Walls)', data: shortsData.map(l => ({ y: l.price, x: l.volume })), 
-                      backgroundColor: shortsData.map(l => getDynamicColor(l.volume, maxShortVolume, 'short')) }
-                ]
-            },
-            options: {
-                indexAxis: 'y',
-                responsive: false,
-                maintainAspectRatio: false,
-                plugins: {
-                    title: { display: true, text: `Futures Liquidity Map for ${symbol.toUpperCase()} (Binance + Bybit)`, color: '#FFFFFF', font: { size: 20 } },
-                    legend: { position: 'top', labels: { color: '#FFFFFF' } },
-                    annotation: { annotations: significantAnnotations },
-                    tooltip: {
-                         callbacks: {
-                            label: (context) => {
-                                const side = context.dataset.label || '';
-                                const value = context.parsed.x;
-                                return `${side}: ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value)}`;
-                            }
+    const midPriceLine: Plugin<keyof ChartTypeRegistry> = {
+        id: 'midPriceLine',
+        afterDraw: (chart) => {
+            const ctx = chart.ctx;
+            const yAxis = chart.scales.y;
+            const yValue = yAxis.getPixelForValue(midPrice);
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(chart.chartArea.left, yValue);
+            ctx.lineTo(chart.chartArea.right, yValue);
+            ctx.strokeStyle = '#FFD700';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.fillStyle = '#FFD700';
+            ctx.font = 'bold 14px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText(midPrice.toFixed(midPrice < 1 ? 4 : 2), chart.chartArea.right - 5, yValue - 5);
+            ctx.restore();
+        }
+    };
+
+    const allPricesFromBooks = [...(binanceBook?.bids || []), ...(binanceBook?.asks || []), ...(bybitBook?.bids || []), ...(bybitBook?.asks || [])]
+        .map(([price]) => parseFloat(price));
+    const minPrice = Math.min(...allPricesFromBooks);
+    const maxPrice = Math.max(...allPricesFromBooks);
+    const dynamicPriceRange = (maxPrice - minPrice) * 1.5;
+    const yMin = midPrice - dynamicPriceRange / 2;
+    const yMax = midPrice + dynamicPriceRange / 2;
+
+    const configuration: ChartConfiguration = {
+        type: 'bar',
+        data: {
+            datasets: [
+                { label: 'Longs (Buy Walls)', data: longsData.map(l => ({ y: l.price, x: l.volume })), 
+                  backgroundColor: longsData.map(l => getDynamicColor(l.volume, maxLongVolume, 'long')) },
+                { label: 'Shorts (Sell Walls)', data: shortsData.map(l => ({ y: l.price, x: l.volume })), 
+                  backgroundColor: shortsData.map(l => getDynamicColor(l.volume, maxShortVolume, 'short')) }
+            ]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: false,
+            maintainAspectRatio: false,
+            plugins: {
+                title: { display: true, text: `Futures Liquidity Map for ${symbol.toUpperCase()} (Binance + Bybit)`, color: '#FFFFFF', font: { size: 20 } },
+                legend: { position: 'top', labels: { color: '#FFFFFF' } },
+                annotation: { annotations: significantAnnotations },
+                tooltip: {
+                     callbacks: {
+                        label: (context) => {
+                            const side = context.dataset.label || '';
+                            const value = context.parsed.x;
+                            return `${side}: ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value)}`;
                         }
                     }
-                },
-                scales: {
-                    x: { type: 'logarithmic', title: { display: true, text: 'Volume (USD, Logarithmic Scale)', color: '#FFFFFF'}, ticks: { color: '#B0B3B8', callback: (value) => {const num = Number(value); if (num >= 1000000) return `${(num / 1000000).toFixed(0)}M`; if (num >= 1000) return `${(num / 1000).toFixed(0)}K`; return num.toString();}}},
-                    y: { 
-                        type: 'linear', reverse: false, title: { display: true, text: 'Price (USD)', color: '#FFFFFF' },
-                        min: midPrice * (1 - priceRange),
-                        max: midPrice * (1 + priceRange)
-                    },
                 }
             },
-            plugins: [midPriceLine, AnnotationPlugin]
-        };
+            scales: {
+                x: { type: 'logarithmic', title: { display: true, text: 'Volume (USD, Logarithmic Scale)', color: '#FFFFFF'}, ticks: { color: '#B0B3B8', callback: (value) => {const num = Number(value); if (num >= 1000000) return `${(num / 1000000).toFixed(0)}M`; if (num >= 1000) return `${(num / 1000).toFixed(0)}K`; return num.toString();}}},
+                y: { 
+                    type: 'linear', reverse: false, title: { display: true, text: 'Price (USD)', color: '#FFFFFF' },
+                    min: yMin,
+                    max: yMax
+                },
+            }
+        },
+        plugins: [midPriceLine, AnnotationPlugin]
+    };
 
-        return this.chartJSNodeCanvas.renderToBuffer(configuration);
-    }
+    return this.chartJSNodeCanvas.renderToBuffer(configuration);
+}
 }

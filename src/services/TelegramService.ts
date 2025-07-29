@@ -3,6 +3,7 @@
 import TelegramBot, { Message } from 'node-telegram-bot-api';
 import { DatabaseService, User, LiquidationData } from './DatabaseService';
 import { ReportingService } from './ReportingService';
+import { LiquidityMapService } from './LiquidityMapService'; // ИМПОРТ: Добавляем сервис карты ликвидности
 import { SYMBOLS_TO_TRACK } from '../config';
 
 type UserState = 'awaiting_threshold';
@@ -12,25 +13,72 @@ export class TelegramService {
     private bot: TelegramBot;
     private dbService: DatabaseService;
     private reportingService: ReportingService;
+    private liquidityMapService: LiquidityMapService; // ДОБАВЛЕНО: Свойство для нового сервиса
     private readonly reportIntervals = [1, 4, 12, 24];
     private userStates: Map<number, UserState> = new Map();
 
-    constructor(token: string, dbService: DatabaseService, reportingService: ReportingService) {
+    constructor(
+        token: string,
+        dbService: DatabaseService,
+        reportingService: ReportingService,
+        liquidityMapService: LiquidityMapService
+    ) {
         this.bot = new TelegramBot(token, { polling: true });
         this.dbService = dbService;
         this.reportingService = reportingService;
+        this.liquidityMapService = liquidityMapService;
         this.listenForCommands();
         console.log('TelegramService initialized in interactive mode.');
     }
 
     private listenForCommands(): void {
         this.bot.onText(/\/start/, this.handleStart.bind(this));
+        this.bot.onText(/\/map (.+)/, this.handleLiquidityMap.bind(this));
         this.bot.onText(/📢 Report Now/, this.handleReportNow.bind(this));
         this.bot.onText(/📊 Market Stats/, this.handleMarketStats.bind(this));
         this.bot.onText(/⚙️ Settings/, this.handleSettings.bind(this));
         this.bot.onText(/🔇 Mute Alerts|🔊 Unmute Alerts/, this.handleMuteToggle.bind(this));
         this.bot.on('callback_query', this.handleCallbackQuery.bind(this));
         this.bot.on('message', this.handleMessage.bind(this));
+    }
+    
+private async handleLiquidityMap(msg: Message, match: RegExpExecArray | null): Promise<void> {
+        const chatId = msg.chat.id;
+        if (!match || !match[1]) {
+            this.bot.sendMessage(chatId, "Please specify a trading pair. For example: `/map BTCUSDT`", { parse_mode: 'Markdown' });
+            return;
+        }
+
+        const symbol = match[1].toUpperCase();
+        
+        if (!SYMBOLS_TO_TRACK.includes(symbol)) {
+             this.bot.sendMessage(chatId, `Sorry, the symbol *${symbol}* is not supported. Please choose from the list in the settings.`, { parse_mode: 'Markdown' });
+            return;
+        }
+
+        await this.bot.sendMessage(chatId, `🔍 Generating liquidity map for *${symbol}*... This may take a moment.`, { parse_mode: 'Markdown' });
+
+        try {
+            const imageBuffer = await this.liquidityMapService.generateLiquidityMap(symbol);
+
+            if (imageBuffer) {
+                const caption = `🗺️ *Liquidity Map for ${symbol}*\n\nThis chart shows significant order book depth from Binance & Bybit, highlighting potential support (🟢) and resistance (🔴) zones. Larger bars indicate a higher concentration of orders.`;
+
+                await this.bot.sendPhoto(chatId, imageBuffer, { 
+                    caption: caption, 
+                    parse_mode: 'Markdown' 
+                }, {
+                    filename: 'liquidity_map.png', 
+                    contentType: 'image/png'
+                });
+
+            } else {
+                await this.bot.sendMessage(chatId, `Could not generate a liquidity map for *${symbol}*. Please ensure it's a valid pair (e.g., SOLUSDT) and try again later.`, { parse_mode: 'Markdown' });
+            }
+        } catch (error) {
+            console.error(`[${symbol}] Failed to generate or send liquidity map:`, error);
+            await this.bot.sendMessage(chatId, "An unexpected error occurred while creating the map. This might be a temporary network issue. Please try again later.");
+        }
     }
 
     private async handleMarketStats(msg: Message): Promise<void> {
@@ -136,8 +184,9 @@ export class TelegramService {
         const chatId = msg.chat.id;
         if (msg.text) {
             const commandText = msg.text;
+            // Обновляем список, чтобы не перехватывать новую команду как обычное сообщение
             const handledCommands = ['/start', '📢 Report Now', '📊 Market Stats', '⚙️ Settings', '🔇 Mute Alerts', '🔊 Unmute Alerts'];
-            if(handledCommands.includes(commandText)) return;
+            if(handledCommands.includes(commandText) || commandText.startsWith('/map')) return;
         }
 
         const currentState = this.userStates.get(chatId);
@@ -160,10 +209,11 @@ export class TelegramService {
         const { id: chatId, first_name: firstName, username } = msg.chat;
         const user = await this.dbService.findOrCreateUser(chatId, firstName, username); 
         const displayName = firstName || 'there';
-        const welcomeMessage = `👋 Hello, ${displayName}!\n\nI am a cryptocurrency liquidations tracking bot. I will send you real-time alerts for large liquidations and periodic summary reports.\n\nUse the buttons below to configure your preferences.`;
+        const welcomeMessage = `👋 Hello, ${displayName}!\n\nI am a cryptocurrency liquidations tracking bot. I will send you real-time alerts for large liquidations and periodic summary reports.\n\nTo see a *liquidity map* for a specific pair, use the command \`/map COIN\`, for example: \`/map SOLUSDT\`\n\nUse the buttons below to configure your other preferences.`;
         
         this.bot.sendMessage(chatId, welcomeMessage, {
-            reply_markup: this.generateMainMenuKeyboard(user)
+            reply_markup: this.generateMainMenuKeyboard(user),
+            parse_mode: 'Markdown'
         });
     }
     
@@ -309,7 +359,6 @@ export class TelegramService {
                 this.bot.sendMessage(chatId, explanation, { parse_mode: 'Markdown' });
             }
         } else if (action === 'noop') {
-
         }
         
         await this.bot.answerCallbackQuery(query.id);
@@ -399,18 +448,22 @@ export class TelegramService {
         }
 
         for (const user of users) {
-            if (value >= user.minLiquidationAlert) {
+            if (user.notificationsEnabled && value >= user.minLiquidationAlert) {
                 await this.sendMessage(user.chatId, message);
             }
         }
     }
 
-    public async sendMessage(chatId: string | number, message: string, options: any = { parse_mode: 'Markdown' }): Promise<void> {
+        public async sendMessage(chatId: string | number, message: string, options: any = { parse_mode: 'Markdown' }): Promise<void> {
         try {
             await this.bot.sendMessage(chatId, message, options);
         } catch (error: any) {
             if (error.response?.body?.error_code === 403) {
-                console.warn(`[${chatId}] Bot was blocked by the user. Deactivating notifications.`);
+                console.warn(`[${chatId}] Bot was blocked by the user. Deactivating user.`);
+                if (typeof chatId === 'number') {
+                    await this.dbService.toggleUserNotifications(chatId, false);
+                }
+
             } else {
                  console.error(`❌ Failed to send message to Telegram chat ${chatId}: ${error.message}`);
             }

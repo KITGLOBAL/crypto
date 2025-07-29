@@ -5,6 +5,7 @@ import { LiquidationListener } from './services/LiquidationListener';
 import { DatabaseService } from './services/DatabaseService';
 import { TelegramService } from './services/TelegramService';
 import { ReportingService } from './services/ReportingService';
+import { LiquidityMapService } from './services/LiquidityMapService'; // ИМПОРТ: Добавлен новый сервис
 import { SYMBOLS_TO_TRACK } from './config';
 
 function validateEnv() {
@@ -27,13 +28,15 @@ async function main() {
     await dbService.connect();
 
     const reportingService = new ReportingService(dbService);
-    
+    const liquidityMapService = new LiquidityMapService(); // ИНИЦИАЛИЗАЦИЯ: Создаем экземпляр сервиса карты ликвидности
+
     const telegramService = new TelegramService(
-        process.env.TELEGRAM_BOT_TOKEN!, 
+        process.env.TELEGRAM_BOT_TOKEN!,
         dbService,
-        reportingService
+        reportingService,
+        liquidityMapService // ИЗМЕНЕНИЕ: Передаем новый сервис в конструктор TelegramService
     );
-    
+
     reportingService.setTelegramService(telegramService);
 
     const listener = new LiquidationListener(

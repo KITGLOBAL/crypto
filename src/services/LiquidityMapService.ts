@@ -45,7 +45,7 @@ export class LiquidityMapService {
     private async fetchOrderBook(symbol: string, exchange: 'binance' | 'bybit'): Promise<OrderBookData | null> {
         try {
             const url = exchange === 'binance'
-                ? `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol.toUpperCase()}&limit=500`
+                ? `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol.toUpperCase()}&limit=1000`
                 : `https://api.bybit.com/v5/market/orderbook?category=linear&symbol=${symbol.toUpperCase()}&limit=500`;
             const response = await fetch(url);
             if (!response.ok) return null;

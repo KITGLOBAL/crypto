@@ -97,8 +97,8 @@ export class LiquidityMapService {
         const aggregation = symbolInfo.tickSize * (midPrice > 1000 ? 100 : 50);
         const { longs, shorts } = this.analyzeLiquidity(books, aggregation);
         
-        const minVolumeThreshold = 70000;
-        const priceRange = 0.15;
+        const minVolumeThreshold = 2000;
+        const priceRange = 0.08;
 
         const filterAndSort = (levels: LiquidityLevel[]) => levels
             .filter(l => l.volume > minVolumeThreshold)
@@ -123,7 +123,6 @@ export class LiquidityMapService {
                 type: 'line', yMin: l.price, yMax: l.price, borderColor: '#FFD700', borderWidth: 1, borderDash: [5, 5],
                 label: { 
                     content: `$${(l.volume / 1000000).toFixed(1)}M`, 
-                    // ИСПРАВЛЕНИЕ: 'enabled' заменено на 'display'
                     display: true, 
                     position: 'end', 
                     backgroundColor: 'rgba(0,0,0,0.6)', 
@@ -190,7 +189,6 @@ export class LiquidityMapService {
                     },
                 }
             },
-            // Восстанавливаем оба плагина
             plugins: [midPriceLine, AnnotationPlugin]
         };
 

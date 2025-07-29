@@ -62,19 +62,15 @@ private async handleLiquidityMap(msg: Message, match: RegExpExecArray | null): P
             const imageBuffer = await this.liquidityMapService.generateLiquidityMap(symbol);
 
             if (imageBuffer) {
-                const caption = `🗺️ *Premarket Liquidity Map for ${symbol}*\n\nThis chart shows significant order book depth from Binance & Bybit, highlighting potential support (🟢) and resistance (🔴) zones. Larger bars indicate a higher concentration of orders.`;
+                const caption = `🗺️ *Liquidity Map for ${symbol}*\n\nThis chart shows significant order book depth from Binance & Bybit, highlighting potential support (🟢) and resistance (🔴) zones. Larger bars indicate a higher concentration of orders.`;
 
-                // =================================================================================
-                // ИСПРАВЛЕНИЕ: Используем более надежный способ отправки файла (буфера)
-                // =================================================================================
                 await this.bot.sendPhoto(chatId, imageBuffer, { 
                     caption: caption, 
                     parse_mode: 'Markdown' 
                 }, {
-                    filename: 'liquidity_map.png', // Явно указываем имя файла
-                    contentType: 'image/png'      // и его тип
+                    filename: 'liquidity_map.png', 
+                    contentType: 'image/png'
                 });
-                // =================================================================================
 
             } else {
                 await this.bot.sendMessage(chatId, `Could not generate a liquidity map for *${symbol}*. Please ensure it's a valid pair (e.g., SOLUSDT) and try again later.`, { parse_mode: 'Markdown' });

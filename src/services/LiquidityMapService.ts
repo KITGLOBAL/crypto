@@ -288,9 +288,9 @@ export class LiquidityMapService {
                 type: 'line',
                 yMin: price,
                 yMax: price,
-                borderColor: ANNOTATION_COLOR,
-                borderWidth: 1,
-                borderDash: isTop ? [2, 2] : [],
+                borderColor: isTop ? ANNOTATION_COLOR : 'rgba(0,0,0,0)',
+                borderWidth: isTop ? 1.5 : 0,
+                borderDash: isTop ? [5, 5] : [],
                 label: {
                     content: `$${volume.toFixed(1)}K (${volumePercentage}%)`,
                     display: true,

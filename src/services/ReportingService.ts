@@ -3,6 +3,8 @@
 import cron from 'node-cron';
 import { DatabaseService, User } from './DatabaseService';
 import { TelegramService } from './TelegramService';
+import { MarketDataService } from './MarketDataService';
+import { SYMBOLS_TO_TRACK } from '../config';
 
 type LiquidationStats = {
     longs: number;
@@ -11,11 +13,13 @@ type LiquidationStats = {
 
 export class ReportingService {
     private dbService: DatabaseService;
+    private marketDataService: MarketDataService;
     private telegramService!: TelegramService; 
 
-    constructor(dbService: DatabaseService) {
+    constructor(dbService: DatabaseService, marketDataService: MarketDataService) {
         this.dbService = dbService;
-        console.log('ReportingService initialized.');
+        this.marketDataService = marketDataService;
+        console.log('✅ ReportingService initialized.');
     }
 
     public setTelegramService(telegramService: TelegramService): void {
@@ -23,19 +27,38 @@ export class ReportingService {
     }
 
     public start(): void {
-        const reportCronPattern = '0 * * * *';
-        console.log(`🚀 Scheduled reporting service with cron pattern: "${reportCronPattern}"`);
-        cron.schedule(reportCronPattern, () => {
-            console.log('🕒 Cron job triggered: Checking for scheduled reports...');
+        // 1. Отчеты по ликвидациям (каждый час)
+        cron.schedule('0 * * * *', () => {
+            console.log('🕒 Hourly report check...');
             this.generateAndSendScheduledReports();
         });
 
-        const cleanupCronPattern = '0 0 * * *';
-        console.log(`🧹 Database cleanup service scheduled with cron pattern: "${cleanupCronPattern}"`);
-        cron.schedule(cleanupCronPattern, () => {
-            console.log('🗑️ Cron job triggered: Cleaning up old database records...');
+        // 2. Чистка базы (раз в сутки)
+        cron.schedule('0 0 * * *', () => {
             this.cleanupOldData();
         });
+
+        // 3. Мониторинг OI (каждые 15 минут)
+        console.log('🚀 OI Monitor scheduled (every 15 min)');
+        cron.schedule('*/15 * * * *', () => {
+            this.checkOpenInterestSurges();
+        });
+    }
+
+    private async checkOpenInterestSurges(): Promise<void> {
+        try {
+            // Проверка сбоев OI
+            const surges = await this.marketDataService.checkOIFluctuations(SYMBOLS_TO_TRACK);
+            
+            if (surges.length > 0) {
+                console.log(`🚨 Detected ${surges.length} OI surges. Sending alerts...`);
+                for (const surge of surges) {
+                    await this.telegramService.sendOISurgeAlert(surge);
+                }
+            }
+        } catch (error) {
+            console.error('❌ Error in OI Monitor:', error);
+        }
     }
 
     private async cleanupOldData(): Promise<void> {
@@ -45,14 +68,12 @@ export class ReportingService {
     }
 
     public async generateAndSendScheduledReports(): Promise<void> {
-        console.log('Checking schedules for automated reports...');
         const activeUsers = await this.dbService.getActiveUsers();
         if (activeUsers.length === 0) return;
 
         const currentHour = new Date().getHours();
         for (const user of activeUsers) {
             if (currentHour % user.reportIntervalHours === 0) {
-                console.log(`[${user.chatId}] It's time for their scheduled ${user.reportIntervalHours}-hour report. Generating...`);
                 const reportMessage = await this.generateReportForUser(user, user.reportIntervalHours, true);
                 if (reportMessage) {
                     await this.telegramService.sendMessage(user.chatId, reportMessage);
@@ -100,7 +121,7 @@ export class ReportingService {
             previousPeriodEnd = new Date(reportPeriodStart);
             previousPeriodStart = new Date(previousPeriodEnd);
             previousPeriodStart.setHours(previousPeriodStart.getHours() - intervalHours);
-            reportTitle = `*${intervalHours}-Hour Liquidation Report* 📊\n_(Compared to the previous ${intervalHours} hours)_`;
+            reportTitle = `*${intervalHours}-Hour Liquidation Report* 📊`;
         } else {
             reportPeriodEnd = new Date(now);
             reportPeriodStart = new Date(now);
@@ -109,7 +130,7 @@ export class ReportingService {
             previousPeriodEnd = new Date(reportPeriodStart);
             previousPeriodStart = new Date(previousPeriodEnd);
             previousPeriodStart.setHours(previousPeriodStart.getHours() - intervalHours);
-            reportTitle = `*Live Report for Current Hour* 📊\n_(Compared to the previous full hour)_`;
+            reportTitle = `*Live Report for Current Hour* 📊`;
         }
 
         const currentStats = await this.getStatsForPeriod(user.trackedSymbols, reportPeriodStart, reportPeriodEnd);
@@ -118,6 +139,7 @@ export class ReportingService {
         if (currentStats.size === 0) {
             return `No liquidations recorded for your tracked pairs in the current period.`;
         }
+        const fundingMap = await this.marketDataService.getFundingMap(user.trackedSymbols);
 
         let longsReport = '';
         let shortsReport = '';
@@ -128,6 +150,9 @@ export class ReportingService {
             const current = currentStats.get(symbol)!;
             const previous = previousStats.get(symbol) || { longs: 0, shorts: 0 };
             
+            const rate = fundingMap.get(symbol);
+            const fundingStr = rate !== undefined ? ` | ⚡ ${(rate * 100).toFixed(4)}%` : '';
+
             let comparisonLongs = previous.longs;
             let comparisonShorts = previous.shorts;
             if(!isScheduled){
@@ -141,56 +166,28 @@ export class ReportingService {
                 let trend = '';
                 if (current.longs > comparisonLongs) trend = ' ⬆️';
                 else if (current.longs < comparisonLongs) trend = ' ⬇️';
-                longsReport += `  ▪️ ${symbol}: $${this.formatCurrency(current.longs)}${trend}\n`;
+                longsReport += `  ▪️ ${symbol}: $${this.formatCurrency(current.longs)}${trend}${fundingStr}\n`;
                 totalLongsValue += current.longs;
             }
             if (current.shorts > 0) {
                 let trend = '';
                 if (current.shorts > comparisonShorts) trend = ' ⬆️';
                 else if (current.shorts < comparisonShorts) trend = ' ⬇️';
-                shortsReport += `  ▪️ ${symbol}: $${this.formatCurrency(current.shorts)}${trend}\n`;
+                shortsReport += `  ▪️ ${symbol}: $${this.formatCurrency(current.shorts)}${trend}${fundingStr}\n`;
                 totalShortsValue += current.shorts;
             }
-        }
-        
-        const getTopThree = (side: 'longs' | 'shorts') => {
-            return Array.from(currentStats.entries())
-                .filter(([, stats]) => stats[side] > 0)
-                .sort((a, b) => b[1][side] - a[1][side])
-                .slice(0, 3)
-                .map(([symbol, stats], index) => {
-                    const medals = ['🥇', '🥈', '🥉'];
-                    return `    ${medals[index]} ${symbol}: $${this.formatCurrency(stats[side])}`;
-                })
-                .join('\n');
-        };
-
-        const topLongs = getTopThree('longs');
-        const topShorts = getTopThree('shorts');
-        let topMoversReport = '';
-
-        if(topLongs || topShorts){
-            topMoversReport = '*Top rekted rank* 🏆\n';
-            if(topLongs) topMoversReport += `  *Top Long Liquidations:*\n${topLongs}\n`;
-            if(topShorts) topMoversReport += `  *Top Short Liquidations:*\n${topShorts}\n`;
         }
 
         let finalReport = `${reportTitle}\n\n`;
 
         if (longsReport) {
-            finalReport += `*🔴 LONGS LIQUIDATED*\n${longsReport}  *Subtotal: $${this.formatCurrency(totalLongsValue)}*\n\n`;
+            finalReport += `*🔴 LONGS LIQUIDATED*\n${longsReport}\n`;
         }
         if (shortsReport) {
-            finalReport += `*🟢 SHORTS LIQUIDATED*\n${shortsReport}  *Subtotal: $${this.formatCurrency(totalShortsValue)}*\n\n`;
+            finalReport += `*🟢 SHORTS LIQUIDATED*\n${shortsReport}\n`;
         }
         
-        if (!longsReport && !shortsReport) return null;
-        
-        finalReport += `*OVERALL TOTAL:*\n  🔴 Longs: $${this.formatCurrency(totalLongsValue)}\n  🟢 Shorts: $${this.formatCurrency(totalShortsValue)}\n\n`;
-
-        if (topMoversReport) {
-            finalReport += `${topMoversReport}`;
-        }
+        finalReport += `*TOTAL:* 🔴 $${this.formatCurrency(totalLongsValue)} | 🟢 $${this.formatCurrency(totalShortsValue)}`;
 
         return finalReport;
     }

@@ -9,73 +9,120 @@ export class LiquidationListener {
     private dbService: DatabaseService;
     private telegramService: TelegramService;
     private wsBaseUrl: string;
-    private connections: Map<string, WebSocket> = new Map();
+    // Храним массив сокетов, так как теперь их будет несколько (по 1 на пачку символов)
+    private activeSockets: WebSocket[] = [];
+    private keepAliveIntervals: NodeJS.Timeout[] = [];
+    private isRestarting = false;
 
     constructor(symbolsToTrack: string[], dbService: DatabaseService, telegramService: TelegramService, wsBaseUrl: string) {
         this.symbols = symbolsToTrack;
         this.dbService = dbService;
         this.telegramService = telegramService;
         this.wsBaseUrl = wsBaseUrl;
-        console.log('LiquidationListener initialized to permanently track symbols:', this.symbols.join(', '));
+        console.log(`LiquidationListener initialized. Tracking ${this.symbols.length} symbols.`);
     }
 
     public start(): void {
-        console.log('Starting permanent WebSocket listeners for all configured pairs...');
-        this.symbols.forEach(symbol => {
-            this.connect(symbol);
+        if (this.isRestarting) return;
+        console.log('🚀 Starting optimized Combined WebSocket listeners...');
+        
+        // Binance ограничивает длину URL, поэтому разбиваем список символов на чанки (например, по 50)
+        const CHUNK_SIZE = 50;
+        const chunks = [];
+        
+        for (let i = 0; i < this.symbols.length; i += CHUNK_SIZE) {
+            chunks.push(this.symbols.slice(i, i + CHUNK_SIZE));
+        }
+
+        chunks.forEach((chunk, index) => {
+            this.connectChunk(chunk, index + 1);
         });
     }
 
-    private connect(symbol: string): void {
-        if (this.connections.has(symbol)) {
-             return;
-        }
+    public async restartConnections(): Promise<void> {
+        console.log('♻️ Scheduled WebSocket restart (24h refresh)...');
+        this.isRestarting = true;
+        
+        // Закрываем все текущие соединения
+        this.activeSockets.forEach(ws => {
+            ws.removeAllListeners();
+            ws.terminate();
+        });
+        this.activeSockets = [];
+        
+        this.keepAliveIntervals.forEach(clearInterval);
+        this.keepAliveIntervals = [];
 
-        const streamName = `${symbol.toLowerCase()}@forceOrder`;
-        const wsURL = `${this.wsBaseUrl}/ws/${streamName}`;
+        console.log('🔌 All connections closed. Waiting 5 seconds before reconnecting...');
+        
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        this.isRestarting = false;
+        this.start();
+    }
+
+    private connectChunk(chunkSymbols: string[], chunkId: number): void {
+        // Формируем URL для комбинированного стрима: stream?streams=btcusdt@forceOrder/ethusdt@forceOrder...
+        const streams = chunkSymbols.map(s => `${s.toLowerCase()}@forceOrder`).join('/');
+        const wsURL = `${this.wsBaseUrl}/stream?streams=${streams}`;
         
         const ws = new WebSocket(wsURL);
-        this.connections.set(symbol, ws);
+        this.activeSockets.push(ws);
 
         ws.on('open', () => {
-            console.log(`✅ [${symbol}] Successfully connected to WebSocket stream.`);
+            console.log(`✅ [Chunk ${chunkId}] Connected (${chunkSymbols.length} pairs).`);
+            // Простейший пинг, чтобы соединение не висело мертвым грузом
+            const pingInterval = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.ping();
+                }
+            }, 30000);
+            this.keepAliveIntervals.push(pingInterval);
         });
 
         ws.on('message', (data: WebSocket.Data) => {
             try {
-                const parsedData = JSON.parse(data.toString());
-                if (parsedData.e === 'forceOrder') {
-                    const liquidation: LiquidationData = {
-                        symbol: parsedData.o.s,
-                        side: parsedData.o.S === 'BUY' ? 'short liquidation' : 'long liquidation',
-                        price: parseFloat(parsedData.o.p),
-                        quantity: parseFloat(parsedData.o.q),
-                        time: new Date(parsedData.o.T).toISOString(),
-                    };
-                    
-                    this.dbService.saveLiquidation(liquidation);
-                    
-                    const value = liquidation.price * liquidation.quantity;
-                    console.log(`💾 [${liquidation.symbol}] Saved ${liquidation.side} of value $${value.toFixed(2)}`);
+                const parsedMessage = JSON.parse(data.toString());
+                // Формат combined stream: { "stream": "...", "data": { ... payload ... } }
+                const payload = parsedMessage.data;
 
-                    this.telegramService.sendRealtimeLiquidationAlert(liquidation);
+                if (payload && payload.e === 'forceOrder') {
+                    this.processLiquidation(payload.o);
                 }
             } catch (error) {
-                console.error(`[${symbol}] Error parsing message:`, error);
+                console.error(`[Chunk ${chunkId}] Error parsing message:`, error);
             }
         });
 
         ws.on('error', (error) => {
-            console.error(`❌ [${symbol}] WebSocket error:`, error.message);
+            console.error(`❌ [Chunk ${chunkId}] WebSocket error:`, error.message);
         });
         
         ws.on('close', (code, reason) => {
-            const reasonString = reason.toString() || 'No reason specified';
-            console.log(`🔌 [${symbol}] WebSocket disconnected. Code: ${code}. Reason: ${reasonString}.`);
+            if (this.isRestarting) return; // Если мы сами перезагружаем, не пытаемся реконнектиться отдельно
             
-            this.connections.delete(symbol);
-            console.log(`[${symbol}] Reconnecting in 5 seconds...`);
-            setTimeout(() => this.connect(symbol), 5000);
+            console.log(`🔌 [Chunk ${chunkId}] Disconnected (Code: ${code}). Reconnecting...`);
+            setTimeout(() => this.connectChunk(chunkSymbols, chunkId), 5000);
         });
+    }
+
+    private processLiquidation(orderData: any): void {
+        const liquidation: LiquidationData = {
+            symbol: orderData.s,
+            side: orderData.S === 'BUY' ? 'short liquidation' : 'long liquidation',
+            price: parseFloat(orderData.p),
+            quantity: parseFloat(orderData.q),
+            time: new Date(orderData.T).toISOString(),
+        };
+        
+        this.dbService.saveLiquidation(liquidation);
+        
+        const value = liquidation.price * liquidation.quantity;
+        // Логируем только крупные, чтобы не спамить в консоль
+        if (value > 10000) {
+             console.log(`💾 [${liquidation.symbol}] Saved ${liquidation.side}: $${value.toFixed(2)}`);
+        }
+
+        this.telegramService.sendRealtimeLiquidationAlert(liquidation);
     }
 }

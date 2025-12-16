@@ -1,4 +1,19 @@
 // src/config.ts
+
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+export const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+export const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/liquidation_tracker';
+
+// Читаем ID канала из .env
+export const TELEGRAM_CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID || '';
+
+// Читаем минимальный порог из .env (по дефолту 10000, если не задано)
+export const CHANNEL_MIN_LIQUIDATION = parseInt(process.env.CHANNEL_MIN_LIQUIDATION || '10000', 10);
+
+
 export const SYMBOLS_TO_TRACK: string[] = [
     'BTCUSDT', // Bitcoin: ~$2.3T market cap, highest trading volume[](https://www.forbes.com/advisor/investing/cryptocurrency/top-10-cryptocurrencies/)
     'ETHUSDT', // Ethereum: ~$447.7B market cap, high volume[](https://www.forbes.com/advisor/investing/cryptocurrency/top-10-cryptocurrencies/)

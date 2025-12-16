@@ -9,10 +9,8 @@
     "serve": "node dist/index.js"
   },
   "dependencies": {
-    "chart.js": "^4.5.0",
-    "chartjs-node-canvas": "^5.0.0",
-    "chartjs-plugin-annotation": "^3.0.1", 
     "dotenv": "^16.4.5",
+    "ioredis": "^5.8.2",
     "mongodb": "^6.6.2",
     "node-cron": "^3.0.3",
     "node-telegram-bot-api": "^0.66.0",

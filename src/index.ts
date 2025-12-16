@@ -1,44 +1,37 @@
 // src/index.ts
-
 import 'dotenv/config';
+import { RedisService } from './services/RedisService'; // New
 import { LiquidationListener } from './services/LiquidationListener';
 import { DatabaseService } from './services/DatabaseService';
 import { TelegramService } from './services/TelegramService';
 import { ReportingService } from './services/ReportingService';
-import { LiquidityMapService } from './services/LiquidityMapService'; // ИМПОРТ: Добавлен новый сервис
+import { MarketDataService } from './services/MarketDataService';
 import { SYMBOLS_TO_TRACK } from './config';
 
-function validateEnv() {
-    const requiredEnvVars = [
-        'FUTURES_WS_URL',
-        'MONGO_DB_NAME',
-        'TELEGRAM_BOT_TOKEN',
-        'MONGO_URI'
-    ];
-    const missingVars = requiredEnvVars.filter(v => !process.env[v]);
-    if (missingVars.length > 0) {
-        throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`);
-    }
-}
 async function main() {
-    validateEnv();
     console.log('Application starting...');
 
+    // 1. Init Database
     const dbService = new DatabaseService(process.env.MONGO_URI!, process.env.MONGO_DB_NAME!);
     await dbService.connect();
 
-    const reportingService = new ReportingService(dbService);
-    const liquidityMapService = new LiquidityMapService(); // ИНИЦИАЛИЗАЦИЯ: Создаем экземпляр сервиса карты ликвидности
+    // 2. Init Redis (Infrastructure)
+    const redisService = new RedisService();
 
+    // 3. Init Services
+    const marketDataService = new MarketDataService(redisService);
+    const reportingService = new ReportingService(dbService, marketDataService);
+    
     const telegramService = new TelegramService(
         process.env.TELEGRAM_BOT_TOKEN!,
         dbService,
         reportingService,
-        liquidityMapService // ИЗМЕНЕНИЕ: Передаем новый сервис в конструктор TelegramService
+        marketDataService
     );
 
     reportingService.setTelegramService(telegramService);
 
+    // 4. Init Listener (With Cascade Logic inside)
     const listener = new LiquidationListener(
         SYMBOLS_TO_TRACK,
         dbService,
@@ -49,10 +42,7 @@ async function main() {
     listener.start();
     reportingService.start();
 
-    console.log('✅ Application successfully started and all services are running.');
+    console.log('✅ System Online: Redis + Cascades + Market Data active.');
 }
 
-main().catch(error => {
-    console.error('An unexpected error occurred in main:', error);
-    process.exit(1);
-});
+main().catch(console.error);

@@ -1,40 +1,46 @@
 # Этап сборки
 FROM node:20-slim AS builder
 
+# Устанавливаем только базовые инструменты для сборки нативных модулей (если нужны)
+# Графические библиотеки (cairo, pango) удалены, так как карты ликвидности больше нет
 RUN apt-get update && apt-get install -y \
     python3 \
-    python3-pip \
     make \
     g++ \
-    pkg-config \
-    libpixman-1-dev \
-    libcairo2-dev \
-    libpango1.0-dev \
-    libjpeg-dev \
-    libgif-dev \
-    libpng-dev
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
+
+# Копируем package.json и lock файлы (если есть)
 COPY package*.json ./
+
+# Устанавливаем зависимости (включая devDependencies для сборки TypeScript)
 RUN npm install
+
+# Копируем исходный код
 COPY . .
+
+# Собираем проект (TypeScript -> JavaScript в папку dist)
 RUN npm run build
 
 # Этап продакшн
 FROM node:20-slim
 
-RUN apt-get update && apt-get install -y \
-    python3 \
-    libpixman-1-0 \
-    libcairo2 \
-    libpango1.0-0 \
-    libjpeg-dev \
-    libgif-dev \
-    libpng-dev
+# В продакшене нам не нужны даже компиляторы, только Node.js
+# Очищаем кэш apt для минимизации размера образа
+RUN apt-get update && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
+
 COPY package*.json ./
+
+# Устанавливаем только production зависимости
 RUN npm install --omit=dev
+
+# Копируем собранный код из этапа builder
 COPY --from=builder /usr/src/app/dist ./dist
 
+# Запускаем
 CMD ["node", "dist/index.js"]

@@ -8,6 +8,11 @@ export interface LiquidationData {
     price: number;
     quantity: number;
     time: string;
+    count?: number;
+    isAggregate?: boolean;
+    windowSeconds?: number;
+    minPrice?: number;
+    maxPrice?: number;
 }
 
 export interface User {
@@ -19,6 +24,21 @@ export interface User {
     reportIntervalHours: number;
     minLiquidationAlert: number;
     createdAt: Date;
+}
+
+export interface UserStats {
+    totalUsers: number;
+    activeUsers: number;
+    minThreshold: number;
+    maxThreshold: number;
+    avgThreshold: number;
+}
+
+export interface LiquidationSummary {
+    symbol: string;
+    longs: number;
+    shorts: number;
+    orders: number;
 }
 
 export class DatabaseService {
@@ -44,7 +64,9 @@ export class DatabaseService {
             const usersCollection = this.db.collection(this.usersCollectionName);
             const liquidationsCollection = this.db.collection(this.liquidationsCollectionName);
             await usersCollection.createIndex({ chatId: 1 }, { unique: true });
+            await usersCollection.createIndex({ notificationsEnabled: 1, trackedSymbols: 1 });
             await liquidationsCollection.createIndex({ symbol: 1, time: -1 });
+            await liquidationsCollection.createIndex({ time: -1 });
 
             console.log('✅ Database indexes are in place.');
 
@@ -61,6 +83,11 @@ export class DatabaseService {
         } catch (error) {
             console.error(`[${liquidation.symbol}] Failed to save liquidation to database.`, error);
         }
+    }
+
+    public async close(): Promise<void> {
+        await this.client.close();
+        console.log('✅ MongoDB connection closed.');
     }
     
     public async getLiquidationsBetween(symbol: string, startTime: Date, endTime: Date): Promise<WithId<LiquidationData>[]> {
@@ -193,6 +220,105 @@ export class DatabaseService {
             notificationsEnabled: true,
             trackedSymbols: symbol
         }).toArray();
+    }
+
+    public async getUsersCount(): Promise<number> {
+        const collection = this.db.collection<User>(this.usersCollectionName);
+        return collection.countDocuments();
+    }
+
+    public async getUserStats(): Promise<UserStats> {
+        const collection = this.db.collection<User>(this.usersCollectionName);
+        const [totalUsers, activeUsers, thresholdStats] = await Promise.all([
+            collection.countDocuments(),
+            collection.countDocuments({
+                notificationsEnabled: true,
+                trackedSymbols: { $exists: true, $not: { $size: 0 } }
+            }),
+            collection.aggregate<{ minThreshold: number; maxThreshold: number; avgThreshold: number }>([
+                {
+                    $group: {
+                        _id: null,
+                        minThreshold: { $min: '$minLiquidationAlert' },
+                        maxThreshold: { $max: '$minLiquidationAlert' },
+                        avgThreshold: { $avg: '$minLiquidationAlert' }
+                    }
+                }
+            ]).next()
+        ]);
+
+        return {
+            totalUsers,
+            activeUsers,
+            minThreshold: thresholdStats?.minThreshold || 0,
+            maxThreshold: thresholdStats?.maxThreshold || 0,
+            avgThreshold: thresholdStats?.avgThreshold || 0
+        };
+    }
+
+    public async getMinimumUserThresholdForSymbol(symbol: string): Promise<number | null> {
+        const collection = this.db.collection<User>(this.usersCollectionName);
+        const user = await collection.find({
+            notificationsEnabled: true,
+            trackedSymbols: symbol
+        }).sort({ minLiquidationAlert: 1 }).limit(1).next();
+
+        return user?.minLiquidationAlert ?? null;
+    }
+
+    public async getLastLiquidations(limit: number): Promise<WithId<LiquidationData>[]> {
+        const collection = this.db.collection<LiquidationData>(this.liquidationsCollectionName);
+        return collection.find({}).sort({ time: -1 }).limit(limit).toArray();
+    }
+
+    public async getLiquidationSummary(startTime: Date, endTime: Date, limit: number = 10): Promise<LiquidationSummary[]> {
+        const collection = this.db.collection(this.liquidationsCollectionName);
+        return collection.aggregate<LiquidationSummary>([
+            {
+                $match: {
+                    time: {
+                        $gte: startTime.toISOString(),
+                        $lt: endTime.toISOString()
+                    }
+                }
+            },
+            {
+                $project: {
+                    symbol: 1,
+                    side: 1,
+                    volume: { $multiply: ['$price', '$quantity'] },
+                    orders: { $ifNull: ['$count', 1] }
+                }
+            },
+            {
+                $group: {
+                    _id: '$symbol',
+                    longs: {
+                        $sum: {
+                            $cond: [{ $eq: ['$side', 'long liquidation'] }, '$volume', 0]
+                        }
+                    },
+                    shorts: {
+                        $sum: {
+                            $cond: [{ $eq: ['$side', 'short liquidation'] }, '$volume', 0]
+                        }
+                    },
+                    orders: { $sum: '$orders' }
+                }
+            },
+            {
+                $project: {
+                    _id: 0,
+                    symbol: '$_id',
+                    longs: 1,
+                    shorts: 1,
+                    orders: 1,
+                    total: { $add: ['$longs', '$shorts'] }
+                }
+            },
+            { $sort: { total: -1 } },
+            { $limit: limit }
+        ]).toArray();
     }
     
     public async deleteOldLiquidations(olderThan: Date): Promise<number> {

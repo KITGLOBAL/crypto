@@ -13,6 +13,24 @@ export const TELEGRAM_CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID || '';
 // Читаем минимальный порог из .env (по дефолту 10000, если не задано)
 export const CHANNEL_MIN_LIQUIDATION = parseInt(process.env.CHANNEL_MIN_LIQUIDATION || '10000', 10);
 
+export const TELEGRAM_ADMIN_IDS = (process.env.TELEGRAM_ADMIN_IDS || '')
+    .split(',')
+    .map(id => parseInt(id.trim(), 10))
+    .filter(id => !Number.isNaN(id));
+
+export const REALTIME_AGGREGATION_WINDOW_SECONDS = parseInt(process.env.REALTIME_AGGREGATION_WINDOW_SECONDS || '30', 10);
+export const CASCADE_WINDOW_SECONDS = parseInt(process.env.CASCADE_WINDOW_SECONDS || '10', 10);
+export const CASCADE_MIN_ORDERS = parseInt(process.env.CASCADE_MIN_ORDERS || '3', 10);
+export const CASCADE_MIN_VOLUME = parseInt(process.env.CASCADE_MIN_VOLUME || '50000', 10);
+export const DISBALANCE_WINDOW_MINUTES = parseInt(process.env.DISBALANCE_WINDOW_MINUTES || '15', 10);
+export const DISBALANCE_RATIO = parseFloat(process.env.DISBALANCE_RATIO || '5');
+export const DISBALANCE_MIN_VOLUME = parseInt(process.env.DISBALANCE_MIN_VOLUME || '250000', 10);
+export const STORAGE_MIN_LIQUIDATION = parseInt(process.env.STORAGE_MIN_LIQUIDATION || CHANNEL_MIN_LIQUIDATION.toString(), 10);
+export const CHANNEL_DIGEST_INTERVALS_HOURS = (process.env.CHANNEL_DIGEST_INTERVALS_HOURS || '1,4,24')
+    .split(',')
+    .map(hours => parseInt(hours.trim(), 10))
+    .filter(hours => [1, 4, 24].includes(hours));
+
 
 export const SYMBOLS_TO_TRACK: string[] = [
     'BTCUSDT', // Bitcoin: ~$2.3T market cap, highest trading volume[](https://www.forbes.com/advisor/investing/cryptocurrency/top-10-cryptocurrencies/)

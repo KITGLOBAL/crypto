@@ -1,10 +1,10 @@
 // src/services/TelegramService.ts
 
 import TelegramBot, { Message } from 'node-telegram-bot-api';
-import { DatabaseService, LiquidationData } from './DatabaseService';
+import { DatabaseService, LiquidationData, LiquidationSummary, UserStats } from './DatabaseService';
 import { ReportingService } from './ReportingService';
 import { MarketDataService, OISurge } from './MarketDataService';
-import { SYMBOLS_TO_TRACK, TELEGRAM_CHANNEL_ID, CHANNEL_MIN_LIQUIDATION } from '../config';
+import { SYMBOLS_TO_TRACK, TELEGRAM_CHANNEL_ID, CHANNEL_MIN_LIQUIDATION, TELEGRAM_ADMIN_IDS } from '../config';
 
 type UserState = 'awaiting_threshold';
 const PAIRS_PAGE_SIZE = 30;
@@ -19,6 +19,52 @@ export type CascadeBuffer = {
     startTime: number;
 };
 
+export type AggregatedLiquidationAlert = {
+    symbol: string;
+    side: 'long' | 'short';
+    count: number;
+    totalVolume: number;
+    minPrice: number;
+    maxPrice: number;
+    firstPrice: number;
+    lastPrice: number;
+    startTime: number;
+    endTime: number;
+    windowSeconds: number;
+};
+
+export type DisbalanceAlert = {
+    symbol: string;
+    longs: number;
+    shorts: number;
+    ratio: number;
+    windowMinutes: number;
+};
+
+export type SystemStatus = {
+    uptimeSeconds: number;
+    listener: {
+        trackedSymbols: number;
+        activeSockets: number;
+        socketStates: Record<string, number>;
+        messagesReceived: number;
+        liquidationsProcessed: number;
+        pendingAggregates: number;
+        pendingCascades: number;
+        aggregatesSent: number;
+        cascadesSent: number;
+        disbalanceAlertsSent: number;
+        lastLiquidationAt: string | null;
+    };
+    db: {
+        users: UserStats;
+        lastLiquidations: LiquidationData[];
+    };
+    thresholds: {
+        channelMinLiquidation: number;
+    };
+};
+
 export class TelegramService {
     private bot: TelegramBot;
     private dbService: DatabaseService;
@@ -26,6 +72,7 @@ export class TelegramService {
     private marketDataService: MarketDataService;
     private readonly reportIntervals = [1, 4, 12, 24];
     private userStates: Map<number, UserState> = new Map();
+    private statusProvider?: () => Promise<SystemStatus>;
 
     constructor(
         token: string,
@@ -41,6 +88,15 @@ export class TelegramService {
         console.log(`✅ TelegramService initialized. Channel Mode: ${TELEGRAM_CHANNEL_ID ? 'ON' : 'OFF'}`);
     }
 
+    public setStatusProvider(provider: () => Promise<SystemStatus>): void {
+        this.statusProvider = provider;
+    }
+
+    public async stop(): Promise<void> {
+        await this.bot.stopPolling();
+        console.log('✅ Telegram polling stopped.');
+    }
+
     private listenForCommands(): void {
         this.bot.onText(/\/start/, this.handleStart.bind(this));
         
@@ -53,6 +109,7 @@ export class TelegramService {
         this.bot.onText(/⚙️ Settings/, this.handleSettings.bind(this));
 
         // Текстовые команды
+        this.bot.onText(/\/status/, this.handleStatus.bind(this));
         this.bot.onText(/\/oi (.+)/, this.handleOpenInterest.bind(this));
         this.bot.onText(/\/ratio (.+)/, this.handleRatio.bind(this));
 
@@ -76,8 +133,53 @@ export class TelegramService {
         }).join('');
     }
 
+    private formatCompactMoney(value: number): string {
+        if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
+        if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
+        if (value >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
+        return `$${value.toFixed(0)}`;
+    }
+
+    private formatUptime(seconds: number): string {
+        const days = Math.floor(seconds / 86400);
+        const hours = Math.floor((seconds % 86400) / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+        if (hours > 0) return `${hours}h ${minutes}m`;
+        return `${minutes}m`;
+    }
+
     // --- CHANNEL BROADCAST METHODS (NEW) ---
     // Эти методы вызываются из ReportingService по расписанию
+
+    public async broadcastLiquidationDigest(hours: number): Promise<void> {
+        if (!TELEGRAM_CHANNEL_ID) return;
+
+        try {
+            const now = new Date();
+            const start = new Date(now.getTime() - hours * 60 * 60 * 1000);
+            const summary = await this.dbService.getLiquidationSummary(start, now, 10);
+            if (summary.length === 0) return;
+
+            const totalLongs = summary.reduce((sum, item) => sum + item.longs, 0);
+            const totalShorts = summary.reduce((sum, item) => sum + item.shorts, 0);
+
+            let message = `📌 *Liquidation Digest (${hours}h)*\n\n`;
+            message += `🔴 Longs: *${this.formatCompactMoney(totalLongs)}*\n`;
+            message += `🟢 Shorts: *${this.formatCompactMoney(totalShorts)}*\n\n`;
+            message += `*Top pairs:*\n`;
+
+            summary.forEach((item: LiquidationSummary, index: number) => {
+                const total = item.longs + item.shorts;
+                const dominant = item.longs >= item.shorts ? 'Longs' : 'Shorts';
+                message += `${index + 1}. *${item.symbol}* ${this.formatCompactMoney(total)} (${dominant}, ${item.orders} orders)\n`;
+            });
+
+            await this.sendMessage(TELEGRAM_CHANNEL_ID, message);
+        } catch (error) {
+            console.error(`Error broadcasting ${hours}h liquidation digest:`, error);
+        }
+    }
 
     public async broadcastTopFunding(): Promise<void> {
         if (!TELEGRAM_CHANNEL_ID) return;
@@ -174,6 +276,46 @@ export class TelegramService {
         }
     }
 
+    // --- ALERT: AGGREGATED REALTIME LIQUIDATIONS ---
+    public async sendAggregatedLiquidationAlert(alert: AggregatedLiquidationAlert): Promise<void> {
+        const isLong = alert.side === 'long';
+        const emoji = isLong ? '🔴' : '🟢';
+        const typeText = isLong ? 'Longs liquidated' : 'Shorts liquidated';
+        const priceChange = ((alert.lastPrice - alert.firstPrice) / alert.firstPrice) * 100;
+        const priceChangeText = `${priceChange >= 0 ? '+' : ''}${priceChange.toFixed(2)}%`;
+        const rangeText = `${alert.minPrice.toLocaleString('en-US')} - ${alert.maxPrice.toLocaleString('en-US')}`;
+
+        let context = '';
+        try {
+            const stats = await this.marketDataService.getAssetStats(alert.symbol);
+            if (stats) {
+                context =
+                    `\n⚡ Funding: *${(stats.fundingRate * 100).toFixed(4)}%*` +
+                    `\n📊 OI: *${this.formatCompactMoney(stats.openInterest)}*` +
+                    `\n⚖️ L/S Ratio: *${stats.longShortRatio.toFixed(2)}*`;
+            }
+        } catch (error) {
+            console.error(`[${alert.symbol}] Failed to fetch liquidation context:`, error);
+        }
+
+        const message = `${emoji} *${alert.symbol} ${typeText}*\n\n` +
+                        `💰 Volume: *${this.formatCompactMoney(alert.totalVolume)}* in ${alert.windowSeconds}s\n` +
+                        `🧾 Orders: *${alert.count}*\n` +
+                        `📉 Price move: *${priceChangeText}* (${rangeText})` +
+                        `${context}`;
+
+        if (TELEGRAM_CHANNEL_ID && alert.totalVolume >= CHANNEL_MIN_LIQUIDATION) {
+             await this.sendMessage(TELEGRAM_CHANNEL_ID, message);
+        }
+
+        const users = await this.dbService.findUsersTrackingSymbol(alert.symbol);
+        for (const user of users) {
+            if (user.notificationsEnabled && alert.totalVolume >= user.minLiquidationAlert) {
+                await this.sendMessage(user.chatId, message);
+            }
+        }
+    }
+
     // --- ALERT: CASCADE LIQUIDATIONS ---
     public async sendCascadeAlert(symbol: string, buffer: CascadeBuffer): Promise<void> {
         const isLong = buffer.side === 'long';
@@ -213,6 +355,30 @@ export class TelegramService {
         const users = await this.dbService.findUsersTrackingSymbol(symbol);
         for (const user of users) {
             if (user.notificationsEnabled && buffer.totalVolume >= user.minLiquidationAlert) {
+                await this.sendMessage(user.chatId, message);
+            }
+        }
+    }
+
+    // --- ALERT: 15M LIQUIDATION DISBALANCE ---
+    public async sendDisbalanceAlert(alert: DisbalanceAlert): Promise<void> {
+        const longsDominant = alert.longs >= alert.shorts;
+        const dominantText = longsDominant ? 'Long liquidations dominate' : 'Short liquidations dominate';
+        const emoji = longsDominant ? '🔴⚠️' : '🟢⚠️';
+
+        const message = `${emoji} *LIQUIDATION DISBALANCE: ${alert.symbol}*\n\n` +
+                        `${dominantText} over ${alert.windowMinutes}m\n` +
+                        `🔴 Longs: *${this.formatCompactMoney(alert.longs)}*\n` +
+                        `🟢 Shorts: *${this.formatCompactMoney(alert.shorts)}*\n` +
+                        `📐 Ratio: *${alert.ratio.toFixed(1)}x*`;
+
+        if (TELEGRAM_CHANNEL_ID) {
+            await this.sendMessage(TELEGRAM_CHANNEL_ID, message);
+        }
+
+        const users = await this.dbService.findUsersTrackingSymbol(alert.symbol);
+        for (const user of users) {
+            if (user.notificationsEnabled) {
                 await this.sendMessage(user.chatId, message);
             }
         }
@@ -362,6 +528,50 @@ export class TelegramService {
     }
 
     // --- STANDARD HANDLERS ---
+
+    private async handleStatus(msg: Message): Promise<void> {
+        const chatId = msg.chat.id;
+        if (!TELEGRAM_ADMIN_IDS.includes(chatId)) {
+            await this.bot.sendMessage(chatId, TELEGRAM_ADMIN_IDS.length === 0
+                ? 'Admin access is not configured. Set TELEGRAM_ADMIN_IDS in .env.'
+                : 'Access denied.');
+            return;
+        }
+
+        if (!this.statusProvider) {
+            await this.bot.sendMessage(chatId, 'Status provider is not initialized.');
+            return;
+        }
+
+        const status = await this.statusProvider();
+        const users = status.db.users;
+        const lastItems = status.db.lastLiquidations
+            .slice(0, 5)
+            .map(liq => {
+                const value = liq.price * liq.quantity;
+                return `• ${liq.symbol} ${liq.side.replace(' liquidation', '')}: ${this.formatCompactMoney(value)} at ${new Date(liq.time).toLocaleTimeString('en-US', { hour12: false })}`;
+            })
+            .join('\n') || 'none';
+
+        const socketStates = Object.entries(status.listener.socketStates)
+            .map(([state, count]) => `${state}: ${count}`)
+            .join(', ') || 'none';
+
+        const text = `🛠 *System Status*\n\n` +
+                     `Uptime: *${this.formatUptime(status.uptimeSeconds)}*\n` +
+                     `WS: *${status.listener.activeSockets}* sockets (${socketStates})\n` +
+                     `Tracked pairs: *${status.listener.trackedSymbols}*\n` +
+                     `Messages: *${status.listener.messagesReceived}*, liquidations: *${status.listener.liquidationsProcessed}*\n` +
+                     `Aggregates sent: *${status.listener.aggregatesSent}*, cascades: *${status.listener.cascadesSent}*, disbalances: *${status.listener.disbalanceAlertsSent}*\n` +
+                     `Pending: *${status.listener.pendingAggregates}* agg / *${status.listener.pendingCascades}* cascades\n` +
+                     `Last liquidation: *${status.listener.lastLiquidationAt || 'none'}*\n\n` +
+                     `Users: *${users.totalUsers}* total / *${users.activeUsers}* active\n` +
+                     `User thresholds: min ${this.formatCompactMoney(users.minThreshold)}, avg ${this.formatCompactMoney(users.avgThreshold)}, max ${this.formatCompactMoney(users.maxThreshold)}\n` +
+                     `Channel threshold: *${this.formatCompactMoney(status.thresholds.channelMinLiquidation)}*\n\n` +
+                     `*Last saved liquidations:*\n${lastItems}`;
+
+        await this.sendMessage(chatId, text);
+    }
 
     private async handleStart(msg: Message): Promise<void> {
         const { id: chatId, first_name: firstName, username } = msg.chat;

@@ -6,10 +6,11 @@ import { DatabaseService } from './services/DatabaseService';
 import { TelegramService } from './services/TelegramService';
 import { ReportingService } from './services/ReportingService';
 import { MarketDataService } from './services/MarketDataService';
-import { SYMBOLS_TO_TRACK } from './config';
+import { CHANNEL_MIN_LIQUIDATION, SYMBOLS_TO_TRACK } from './config';
 
 async function main() {
     console.log('Application starting...');
+    const startedAt = Date.now();
 
     // 1. Init Database
     const dbService = new DatabaseService(process.env.MONGO_URI!, process.env.MONGO_DB_NAME!);
@@ -39,10 +40,48 @@ async function main() {
         process.env.FUTURES_WS_URL!
     );
 
+    telegramService.setStatusProvider(async () => ({
+        uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+        listener: listener.getStatus(),
+        db: {
+            users: await dbService.getUserStats(),
+            lastLiquidations: await dbService.getLastLiquidations(5)
+        },
+        thresholds: {
+            channelMinLiquidation: CHANNEL_MIN_LIQUIDATION
+        }
+    }));
+
     listener.start();
     reportingService.start();
 
     console.log('✅ System Online: Redis + Cascades + Market Data active.');
+
+    let shuttingDown = false;
+    const shutdown = async (signal: NodeJS.Signals) => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        console.log(`\n${signal} received. Shutting down gracefully...`);
+
+        try {
+            reportingService.stop();
+            await listener.stop();
+            await telegramService.stop();
+            await redisService.close();
+            await dbService.close();
+            console.log('✅ Graceful shutdown completed.');
+            process.exit(0);
+        } catch (error) {
+            console.error('❌ Graceful shutdown failed:', error);
+            process.exit(1);
+        }
+    };
+
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
 }
 
-main().catch(console.error);
+main().catch(error => {
+    console.error('Fatal startup error:', error);
+    process.exit(1);
+});

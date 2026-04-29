@@ -1,10 +1,10 @@
 // src/services/ReportingService.ts
 
-import cron from 'node-cron';
+import cron, { ScheduledTask } from 'node-cron';
 import { DatabaseService, User } from './DatabaseService';
 import { TelegramService } from './TelegramService';
 import { MarketDataService } from './MarketDataService';
-import { SYMBOLS_TO_TRACK } from '../config';
+import { CHANNEL_DIGEST_INTERVALS_HOURS, SYMBOLS_TO_TRACK } from '../config';
 
 type LiquidationStats = {
     longs: number;
@@ -15,6 +15,7 @@ export class ReportingService {
     private dbService: DatabaseService;
     private marketDataService: MarketDataService;
     private telegramService!: TelegramService; 
+    private tasks: ScheduledTask[] = [];
 
     constructor(dbService: DatabaseService, marketDataService: MarketDataService) {
         this.dbService = dbService;
@@ -28,34 +29,54 @@ export class ReportingService {
 
     public start(): void {
         // 1. ОТЧЕТЫ ЮЗЕРАМ: Каждый час
-        cron.schedule('0 * * * *', () => {
+        this.tasks.push(cron.schedule('0 * * * *', () => {
             console.log('🕒 Hourly report check...');
-            this.generateAndSendScheduledReports();
-        });
+            this.generateAndSendScheduledReports().catch(error => console.error('❌ Scheduled report error:', error));
+        }));
 
         // 2. ЧИСТКА БД: Полночь
-        cron.schedule('0 0 * * *', () => {
-            this.cleanupOldData();
-        });
+        this.tasks.push(cron.schedule('0 0 * * *', () => {
+            this.cleanupOldData().catch(error => console.error('❌ Cleanup error:', error));
+        }));
 
         // 3. OI MONITOR: ТЕПЕРЬ КАЖДЫЙ ЧАС (в 00 минут)
         // Чтобы уменьшить спам и ловить только крупные тренды
         console.log('🚀 OI Monitor scheduled (Hourly)');
-        cron.schedule('0 * * * *', () => {
-            this.checkOpenInterestSurges();
-        });
+        this.tasks.push(cron.schedule('0 * * * *', () => {
+            this.checkOpenInterestSurges().catch(error => console.error('❌ OI monitor error:', error));
+        }));
 
         // 4. КАНАЛ: Фандинг каждые 4 часа
-        cron.schedule('0 */4 * * *', () => {
+        this.tasks.push(cron.schedule('0 */4 * * *', () => {
             console.log('📢 Broadcasting Funding to Channel...');
-            this.telegramService.broadcastTopFunding();
-        });
+            this.telegramService.broadcastTopFunding().catch(error => console.error('❌ Funding broadcast error:', error));
+        }));
 
-        // 5. КАНАЛ: Итоги суток (в 9 утра)
-        cron.schedule('0 9 * * *', () => {
-            console.log('📊 Broadcasting Daily Stats to Channel...');
-            this.telegramService.broadcastDailyStats();
-        });
+        // 5. КАНАЛ: агрегированные digest-сводки вместо постоянного шума
+        if (CHANNEL_DIGEST_INTERVALS_HOURS.includes(1)) {
+            this.tasks.push(cron.schedule('5 * * * *', () => {
+                console.log('📊 Broadcasting 1h liquidation digest...');
+                this.telegramService.broadcastLiquidationDigest(1).catch(error => console.error('❌ 1h digest error:', error));
+            }));
+        }
+        if (CHANNEL_DIGEST_INTERVALS_HOURS.includes(4)) {
+            this.tasks.push(cron.schedule('10 */4 * * *', () => {
+                console.log('📊 Broadcasting 4h liquidation digest...');
+                this.telegramService.broadcastLiquidationDigest(4).catch(error => console.error('❌ 4h digest error:', error));
+            }));
+        }
+        if (CHANNEL_DIGEST_INTERVALS_HOURS.includes(24)) {
+            this.tasks.push(cron.schedule('15 9 * * *', () => {
+                console.log('📊 Broadcasting 24h liquidation digest...');
+                this.telegramService.broadcastLiquidationDigest(24).catch(error => console.error('❌ 24h digest error:', error));
+            }));
+        }
+    }
+
+    public stop(): void {
+        this.tasks.forEach(task => task.stop());
+        this.tasks = [];
+        console.log('✅ Cron tasks stopped.');
     }
 
     private async checkOpenInterestSurges(): Promise<void> {

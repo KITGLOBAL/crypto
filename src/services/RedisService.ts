@@ -38,4 +38,9 @@ export class RedisService {
         }
         return freshData;
     }
+
+    public async close(): Promise<void> {
+        this.client.disconnect();
+        console.log('✅ Redis connection closed.');
+    }
 }

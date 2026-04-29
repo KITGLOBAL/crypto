@@ -9,7 +9,7 @@ import { SYMBOLS_TO_TRACK, TELEGRAM_CHANNEL_ID, CHANNEL_MIN_LIQUIDATION } from '
 type UserState = 'awaiting_threshold';
 const PAIRS_PAGE_SIZE = 30;
 
-// Определение типа CascadeBuffer (локальное, чтобы избежать ошибок импорта)
+// Определение типа CascadeBuffer
 export type CascadeBuffer = {
     count: number;
     totalVolume: number;
@@ -76,15 +76,87 @@ export class TelegramService {
         }).join('');
     }
 
-    // --- ALERT: OI SURGE (АВТОМАТИЧЕСКОЕ ОПОВЕЩЕНИЕ) ---
+    // --- CHANNEL BROADCAST METHODS (NEW) ---
+    // Эти методы вызываются из ReportingService по расписанию
+
+    public async broadcastTopFunding(): Promise<void> {
+        if (!TELEGRAM_CHANNEL_ID) return;
+
+        try {
+            const { high, low } = await this.marketDataService.getTopFundingRates(5);
+            const formatRate = (d: any) => `*${d.symbol}* (${d.exchange}): ${(d.rate * 100).toFixed(4)}%`;
+
+            let message = `⚡ *Funding Rate Update* (Top 5)\n\n`;
+            
+            message += `🔥 *Potential Long Squeeze (High +):*\n`; 
+            high.forEach((d, i) => message += `${i+1}. ${formatRate(d)}\n`);
+            
+            message += `\n🧊 *Potential Short Squeeze (Deep -):*\n`;
+            low.forEach((d, i) => message += `${i+1}. ${formatRate(d)}\n`);
+
+            await this.sendMessage(TELEGRAM_CHANNEL_ID, message);
+        } catch (error) {
+            console.error('Error broadcasting funding:', error);
+        }
+    }
+
+    public async broadcastDailyStats(): Promise<void> {
+        if (!TELEGRAM_CHANNEL_ID) return;
+
+        const now = new Date();
+        const prev = new Date(now.getTime() - 24*60*60*1000);
+        const liqs = await this.dbService.getOverallLiquidationsBetween(prev, now);
+        
+        if(!liqs.length) return;
+        
+        let longs = 0, shorts = 0;
+        liqs.forEach(l => l.side === 'long liquidation' ? longs += l.price * l.quantity : shorts += l.price * l.quantity);
+        
+        const fmt = (v: number) => `$${(v/1000000).toFixed(2)}M`;
+        let dominance = '';
+        if (longs > shorts) dominance = '🔴 Bears Winning (Longs Rekt)';
+        else if (shorts > longs) dominance = '🟢 Bulls Winning (Shorts Squeezed)';
+        else dominance = '⚖️ Market Balanced';
+
+        const msg = `📊 *Daily Market Recap* (24h)\n\n` + 
+                    `🔴 Longs Rekt: *${fmt(longs)}*\n` +
+                    `🟢 Shorts Rekt: *${fmt(shorts)}*\n\n` +
+                    `_${dominance}_`;
+
+        await this.sendMessage(TELEGRAM_CHANNEL_ID, msg);
+    }
+
+    // --- ALERT: OI SURGE (SMART ANALYTICS) ---
     public async sendOISurgeAlert(surge: OISurge): Promise<void> {
         const isPositive = surge.percentChange > 0;
+        const priceUp = surge.priceChangePercent > 0;
+
+        // Логика определения сентимента
+        let sentiment = '';
+        let sentimentIcon = '';
+        
+        if (isPositive && priceUp) {
+            sentiment = 'Longs Entering (Strong Bullish)';
+            sentimentIcon = '🟢🐂';
+        } else if (isPositive && !priceUp) {
+            sentiment = 'Shorts Entering (Strong Bearish)';
+            sentimentIcon = '🔴🐻';
+        } else if (!isPositive && !priceUp) {
+            sentiment = 'Longs Closing (Reversal Risk)';
+            sentimentIcon = '⚠️📉';
+        } else if (!isPositive && priceUp) {
+            sentiment = 'Shorts Covering (Squeeze)';
+            sentimentIcon = '⚠️📈';
+        }
+
         const emoji = isPositive ? '📈' : '📉';
-        const action = isPositive ? 'INCREASED' : 'DROPPED';
+        const action = isPositive ? 'SURGED' : 'DROPPED';
         const color = isPositive ? '🟢' : '🔴';
 
         const message = `${emoji} *OI ALERT: ${surge.symbol}*\n\n` +
-                        `${color} Open Interest ${action} by *${surge.percentChange.toFixed(2)}%* in 15 min!\n\n` +
+                        `${color} OI ${action} by *${surge.percentChange.toFixed(2)}%* (1h)\n` +
+                        `📊 Price Change: *${surge.priceChangePercent > 0 ? '+' : ''}${surge.priceChangePercent.toFixed(2)}%*\n\n` +
+                        `🧠 Analysis: *${sentiment}* ${sentimentIcon}\n\n` +
                         `💵 Price: $${surge.price}\n` +
                         `💰 New OI: *$${(surge.currentOI / 1000000).toFixed(2)}M*`;
 
@@ -93,7 +165,7 @@ export class TelegramService {
             await this.sendMessage(TELEGRAM_CHANNEL_ID, message);
         }
 
-        // 2. ОТПРАВКА ПОДПИСЧИКАМ
+        // 2. ОТПРАВКА ЮЗЕРАМ
         const users = await this.dbService.findUsersTrackingSymbol(surge.symbol);
         for (const user of users) {
             if (user.notificationsEnabled) {
@@ -132,15 +204,46 @@ export class TelegramService {
                         `📉 Range: ${buffer.minPrice} - ${buffer.maxPrice} (${priceChange}%)\n` +
                         `${extraInfo}`;
 
-        // 1. ОТПРАВКА В КАНАЛ (Если объем каскада больше минимума)
+        // 1. ОТПРАВКА В КАНАЛ
         if (TELEGRAM_CHANNEL_ID && buffer.totalVolume >= CHANNEL_MIN_LIQUIDATION) {
             await this.sendMessage(TELEGRAM_CHANNEL_ID, message);
         }
 
-        // 2. ОТПРАВКА ПОДПИСЧИКАМ
+        // 2. ОТПРАВКА ЮЗЕРАМ
         const users = await this.dbService.findUsersTrackingSymbol(symbol);
         for (const user of users) {
             if (user.notificationsEnabled && buffer.totalVolume >= user.minLiquidationAlert) {
+                await this.sendMessage(user.chatId, message);
+            }
+        }
+    }
+
+    // --- ALERT: REALTIME LIQUIDATION ---
+    public async sendRealtimeLiquidationAlert(liquidation: LiquidationData): Promise<void> {
+        const value = liquidation.price * liquidation.quantity;
+        const isLarge = value >= 500000;
+        const isWhale = value >= 1000000;
+
+        let icon = liquidation.side === 'long liquidation' ? '🔴' : '🟢';
+        if (isLarge) icon = liquidation.side === 'long liquidation' ? '🚨💀🔴' : '🚀💰🟢';
+
+        const rektType = liquidation.side === 'long liquidation' ? 'Long' : 'Short';
+        const formattedValue = value >= 1000000 ? `${(value / 1000000).toFixed(2)}M` : `${(value / 1000).toFixed(0)}K`;
+
+        let message = `${icon} *#${liquidation.symbol} REKT ${rektType}:* $${formattedValue} at $${liquidation.price.toLocaleString('en-US')}`;
+        if (isWhale) message = `🔥 *WHALE ALERT!* 🔥\n${message}`;
+
+        // 1. КАНАЛ
+        if (TELEGRAM_CHANNEL_ID && value >= CHANNEL_MIN_LIQUIDATION) {
+             await this.sendMessage(TELEGRAM_CHANNEL_ID, message);
+        }
+
+        // 2. ЮЗЕРЫ
+        const users = await this.dbService.findUsersTrackingSymbol(liquidation.symbol);
+        if (users.length === 0) return;
+
+        for (const user of users) {
+            if (user.notificationsEnabled && value >= user.minLiquidationAlert) {
                 await this.sendMessage(user.chatId, message);
             }
         }
@@ -196,8 +299,8 @@ export class TelegramService {
         for (const ex of stats.exchanges) {
             const fundingPercent = (ex.fundingRate * 100).toFixed(4);
             let icon = '▪️';
-            if (ex.fundingRate > 0.0001) icon = '🔥'; // Высокий фандинг
-            if (ex.fundingRate < 0) icon = '🧊';      // Отрицательный фандинг
+            if (ex.fundingRate > 0.0001) icon = '🔥'; 
+            if (ex.fundingRate < 0) icon = '🧊';      
 
             msgText += `${ex.name}\n`;
             msgText += `   ├ OI: *${formatMoney(ex.openInterest)}*\n`;
@@ -243,12 +346,9 @@ export class TelegramService {
             const formatRate = (d: any) => `*${d.symbol}* (${d.exchange}): ${(d.rate * 100).toFixed(4)}%`;
 
             let message = `⚡ *GLOBAL TOP Funding Rates*\n\n`;
-            
-            // Positive (>0) = Longs pay Shorts = Danger for Longs (Long Squeeze)
             message += `🔥 *Highest (Potential Long Squeeze):*\n`; 
             high.forEach((d, i) => message += `${i+1}. ${formatRate(d)}\n`);
             
-            // Negative (<0) = Shorts pay Longs = Danger for Shorts (Short Squeeze)
             message += `\n🧊 *Lowest (Potential Short Squeeze):*\n`;
             low.forEach((d, i) => message += `${i+1}. ${formatRate(d)}\n`);
 
@@ -567,36 +667,6 @@ export class TelegramService {
     }
 
     // --- STANDARD UTILS ---
-
-    public async sendRealtimeLiquidationAlert(liquidation: LiquidationData): Promise<void> {
-        const value = liquidation.price * liquidation.quantity;
-        const isLarge = value >= 500000;
-        const isWhale = value >= 1000000;
-
-        let icon = liquidation.side === 'long liquidation' ? '🔴' : '🟢';
-        if (isLarge) icon = liquidation.side === 'long liquidation' ? '🚨💀🔴' : '🚀💰🟢';
-
-        const rektType = liquidation.side === 'long liquidation' ? 'Long' : 'Short';
-        const formattedValue = value >= 1000000 ? `${(value / 1000000).toFixed(2)}M` : `${(value / 1000).toFixed(0)}K`;
-
-        let message = `${icon} *#${liquidation.symbol} REKT ${rektType}:* $${formattedValue} at $${liquidation.price.toLocaleString('en-US')}`;
-        if (isWhale) message = `🔥 *WHALE ALERT!* 🔥\n${message}`;
-
-        // 1. ОТПРАВКА В КАНАЛ (Если задан ID и объем > минимума)
-        if (TELEGRAM_CHANNEL_ID && value >= CHANNEL_MIN_LIQUIDATION) {
-             await this.sendMessage(TELEGRAM_CHANNEL_ID, message);
-        }
-
-        // 2. ОТПРАВКА ЮЗЕРАМ
-        const users = await this.dbService.findUsersTrackingSymbol(liquidation.symbol);
-        if (users.length === 0) return;
-
-        for (const user of users) {
-            if (user.notificationsEnabled && value >= user.minLiquidationAlert) {
-                await this.sendMessage(user.chatId, message);
-            }
-        }
-    }
 
     public async sendMessage(chatId: string | number, message: string, options: any = { parse_mode: 'Markdown' }): Promise<void> {
         try {

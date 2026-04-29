@@ -27,27 +27,39 @@ export class ReportingService {
     }
 
     public start(): void {
-        // 1. Отчеты по ликвидациям (каждый час)
+        // 1. ОТЧЕТЫ ЮЗЕРАМ: Каждый час
         cron.schedule('0 * * * *', () => {
             console.log('🕒 Hourly report check...');
             this.generateAndSendScheduledReports();
         });
 
-        // 2. Чистка базы (раз в сутки)
+        // 2. ЧИСТКА БД: Полночь
         cron.schedule('0 0 * * *', () => {
             this.cleanupOldData();
         });
 
-        // 3. Мониторинг OI (каждые 15 минут)
-        console.log('🚀 OI Monitor scheduled (every 15 min)');
-        cron.schedule('*/15 * * * *', () => {
+        // 3. OI MONITOR: ТЕПЕРЬ КАЖДЫЙ ЧАС (в 00 минут)
+        // Чтобы уменьшить спам и ловить только крупные тренды
+        console.log('🚀 OI Monitor scheduled (Hourly)');
+        cron.schedule('0 * * * *', () => {
             this.checkOpenInterestSurges();
+        });
+
+        // 4. КАНАЛ: Фандинг каждые 4 часа
+        cron.schedule('0 */4 * * *', () => {
+            console.log('📢 Broadcasting Funding to Channel...');
+            this.telegramService.broadcastTopFunding();
+        });
+
+        // 5. КАНАЛ: Итоги суток (в 9 утра)
+        cron.schedule('0 9 * * *', () => {
+            console.log('📊 Broadcasting Daily Stats to Channel...');
+            this.telegramService.broadcastDailyStats();
         });
     }
 
     private async checkOpenInterestSurges(): Promise<void> {
         try {
-            // Проверка сбоев OI
             const surges = await this.marketDataService.checkOIFluctuations(SYMBOLS_TO_TRACK);
             
             if (surges.length > 0) {

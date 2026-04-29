@@ -64,7 +64,7 @@ export class LiquidationListener {
     private connectChunk(chunkSymbols: string[], chunkId: number): void {
         // Формируем URL для комбинированного стрима: stream?streams=btcusdt@forceOrder/ethusdt@forceOrder...
         const streams = chunkSymbols.map(s => `${s.toLowerCase()}@forceOrder`).join('/');
-        const wsURL = `${this.wsBaseUrl}/stream?streams=${streams}`;
+        const wsURL = `${this.getMarketStreamBaseUrl()}/stream?streams=${streams}`;
         
         const ws = new WebSocket(wsURL);
         this.activeSockets.push(ws);
@@ -101,9 +101,31 @@ export class LiquidationListener {
         ws.on('close', (code, reason) => {
             if (this.isRestarting) return; // Если мы сами перезагружаем, не пытаемся реконнектиться отдельно
             
-            console.log(`🔌 [Chunk ${chunkId}] Disconnected (Code: ${code}). Reconnecting...`);
+            const reasonString = reason.toString() || 'No reason specified';
+            console.log(`🔌 [Chunk ${chunkId}] Disconnected (Code: ${code}. Reason: ${reasonString}). Reconnecting...`);
             setTimeout(() => this.connectChunk(chunkSymbols, chunkId), 5000);
         });
+    }
+
+    private getMarketStreamBaseUrl(): string {
+        try {
+            const url = new URL(this.wsBaseUrl);
+            const route = url.pathname.replace(/\/+$/, '');
+
+            if (!route || route === '/' || route === '/ws' || route === '/stream') {
+                url.pathname = '/market';
+            } else if (route !== '/market') {
+                console.warn(`⚠️ FUTURES_WS_URL route "${route}" is not valid for liquidation streams. Using /market.`);
+                url.pathname = '/market';
+            }
+
+            url.search = '';
+            url.hash = '';
+            return url.toString().replace(/\/+$/, '');
+        } catch (error) {
+            console.warn(`⚠️ Invalid FUTURES_WS_URL "${this.wsBaseUrl}". Falling back to Binance market endpoint.`);
+            return 'wss://fstream.binance.com/market';
+        }
     }
 
     private processLiquidation(orderData: any): void {
@@ -115,7 +137,9 @@ export class LiquidationListener {
             time: new Date(orderData.T).toISOString(),
         };
         
-        this.dbService.saveLiquidation(liquidation);
+        this.dbService.saveLiquidation(liquidation).catch(error => {
+            console.error(`[${liquidation.symbol}] Failed to save liquidation.`, error);
+        });
         
         const value = liquidation.price * liquidation.quantity;
         // Логируем только крупные, чтобы не спамить в консоль
@@ -123,6 +147,8 @@ export class LiquidationListener {
              console.log(`💾 [${liquidation.symbol}] Saved ${liquidation.side}: $${value.toFixed(2)}`);
         }
 
-        this.telegramService.sendRealtimeLiquidationAlert(liquidation);
+        this.telegramService.sendRealtimeLiquidationAlert(liquidation).catch(error => {
+            console.error(`[${liquidation.symbol}] Failed to send realtime liquidation alert.`, error);
+        });
     }
 }

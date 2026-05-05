@@ -5,6 +5,8 @@ import { DatabaseService, LiquidationData, LiquidationSummary, UserStats } from 
 import { ReportingService } from './ReportingService';
 import { MarketDataService, OISurge } from './MarketDataService';
 import { SYMBOLS_TO_TRACK, TELEGRAM_CHANNEL_ID, CHANNEL_MIN_LIQUIDATION, TELEGRAM_ADMIN_IDS } from '../config';
+import { AnalysisService } from '../analysis/AnalysisService';
+import { AnalysisResult } from '../analysis/types';
 
 type UserState = 'awaiting_threshold';
 const PAIRS_PAGE_SIZE = 30;
@@ -70,6 +72,7 @@ export class TelegramService {
     private dbService: DatabaseService;
     private reportingService: ReportingService;
     private marketDataService: MarketDataService;
+    private analysisService: AnalysisService;
     private readonly reportIntervals = [1, 4, 12, 24];
     private userStates: Map<number, UserState> = new Map();
     private statusProvider?: () => Promise<SystemStatus>;
@@ -78,12 +81,14 @@ export class TelegramService {
         token: string,
         dbService: DatabaseService,
         reportingService: ReportingService,
-        marketDataService: MarketDataService
+        marketDataService: MarketDataService,
+        analysisService: AnalysisService
     ) {
         this.bot = new TelegramBot(token, { polling: true });
         this.dbService = dbService;
         this.reportingService = reportingService;
         this.marketDataService = marketDataService;
+        this.analysisService = analysisService;
         this.listenForCommands();
         console.log(`✅ TelegramService initialized. Channel Mode: ${TELEGRAM_CHANNEL_ID ? 'ON' : 'OFF'}`);
     }
@@ -110,6 +115,7 @@ export class TelegramService {
 
         // Текстовые команды
         this.bot.onText(/\/status/, this.handleStatus.bind(this));
+        this.bot.onText(/\/analyze (.+)/, this.handleAnalyze.bind(this));
         this.bot.onText(/\/oi (.+)/, this.handleOpenInterest.bind(this));
         this.bot.onText(/\/ratio (.+)/, this.handleRatio.bind(this));
 
@@ -147,6 +153,317 @@ export class TelegramService {
         if (days > 0) return `${days}d ${hours}h ${minutes}m`;
         if (hours > 0) return `${hours}h ${minutes}m`;
         return `${minutes}m`;
+    }
+
+    private formatPositioning(ratio: number): string {
+        if (ratio >= 2.5) return `Overlong ${ratio.toFixed(2)}x`;
+        if (ratio >= 1.5) return `Long-biased ${ratio.toFixed(2)}x`;
+        if (ratio <= 0.5) return `Overshort ${(1 / ratio).toFixed(2)}x`;
+        if (ratio <= 0.7) return `Short-biased ${(1 / ratio).toFixed(2)}x`;
+        return `Neutral ${ratio.toFixed(2)}x`;
+    }
+
+    private formatAnalysisResult(result: AnalysisResult, locale: 'ru' | 'en' = 'en'): string {
+        const decisionIcon = result.decision === 'LONG' ? '🟢' : result.decision === 'SHORT' ? '🔴' : '⚪';
+        const escape = (value: string | number) => String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+        const t = this.getAnalysisLabels(locale);
+        const clean = (value: string) => value.replace(/_/g, ' ');
+        const shorten = (value: string, max: number) => this.shortenText(value, max);
+        const entry = result.entry.from && result.entry.to
+            ? `${result.entry.from} - ${result.entry.to}`
+            : 'No trade zone';
+        const takeProfits = result.riskManagement.takeProfit.length
+            ? result.riskManagement.takeProfit.join(' / ')
+            : 'n/a';
+        const tradePlan = result.decision === 'WAIT'
+            ? `<b>${t.tradePlan}</b>\n` +
+              `${t.entryStatus}: <b>${escape(this.getEntryStatusText(result, locale))}</b>\n` +
+              `${t.noActiveSetup} <b>${escape(result.entry.currentPrice)}</b>\n` +
+              `${result.riskManagement.missedRetestEntry ? t.missedRetestZone : t.referenceZone}: ${escape(entry)}\n` +
+              `${escape(shorten(this.localizeRetestEntryComment(result, locale) || t.noEntryWhileWait, 180))}\n\n`
+            : `<b>${t.entry}</b>\n` +
+              `${t.zone}: <b>${escape(entry)}</b>\n` +
+              `${t.current}: <b>${escape(result.entry.currentPrice)}</b>\n\n` +
+              `<b>${t.riskManagement}</b>\n` +
+              `${t.stop}: <b>${escape(result.riskManagement.stopLoss || 'n/a')}</b>\n` +
+              `TP: <b>${escape(takeProfits)}</b>\n` +
+              `R/R: <b>${escape(result.riskManagement.riskReward || 'n/a')}</b>\n` +
+              `Invalidation: <i>${escape(result.riskManagement.invalidation || result.riskManagement.reason || 'n/a')}</i>\n\n`;
+        const warnings = this.buildLocalizedWarnings(result, locale).slice(0, 3).map(item => `• ${escape(shorten(item, 170))}`).join('\n') || '• No major warnings.';
+        const scoreBreakdown = result.categoryScores
+            .filter(item => ['HTF_CONTEXT', 'MARKET_STRUCTURE_4H', 'DERIVATIVES', 'CVD_DELTA', 'RISK_REWARD'].includes(item.category))
+            .map(item => `${item.category.replace(/_/g, ' ')} ${item.score > 0 ? '+' : ''}${item.score}/${item.max}`)
+            .join(' | ');
+        const nextConditions = this.buildLocalizedScenarios(result, locale).slice(0, 3).map(item => `• ${escape(shorten(item, 240))}`).join('\n') || '• No specific trigger yet.';
+        const whyNotNow = this.buildLocalizedWhyNotNow(result, locale)
+            .slice(0, 5)
+            .map(item => `• ${escape(shorten(item, 160))}`)
+            .join('\n') || `• ${locale === 'ru' ? 'Блокирующих причин не найдено.' : 'No blocking reason detected.'}`;
+        const tradeConfidence = result.tradeConfidence === null
+            ? t.tradeConfidenceNa
+            : `${result.tradeConfidence}%`;
+        const waitExplanation = result.decision === 'WAIT'
+            ? `\n<b>${t.summary}</b>\n${escape(shorten(this.sanitizeReportText(result.aiSummary || result.mainReason), 650))}\n\n` +
+              `<b>${t.currentAction}</b>\n${escape(this.buildLocalizedAction(result, locale))}\n`
+            : '';
+
+        return `${decisionIcon} <b>${escape(result.symbol)} 4H Analysis</b>\n\n` +
+               `${t.decision}: <b>${escape(result.decision)}</b>\n` +
+               `${t.directionalBias}: <b>${escape(result.bias)} ${result.directionScore}/100</b>\n` +
+               `${t.setupQuality}: <b>${escape(result.setupQuality)} ${result.setupQualityScore}/100</b>\n` +
+               `${t.riskScore}: <b>${escape(result.riskScore)}/100</b>\n` +
+               `${t.tradeConfidence}: <b>${escape(tradeConfidence)}</b>\n\n` +
+               `${waitExplanation}` +
+               `${tradePlan}` +
+               `<b>${t.whyNotNow}</b>\n${whyNotNow}\n\n` +
+               `<b>${t.requiredEntry}</b>\n${escape(shorten(this.buildLocalizedRequiredEntry(result, locale), 260))}\n\n` +
+               `<b>${t.marketState}</b>\n` +
+               `${t.regime}: ${escape(clean(result.marketRegime))}\n` +
+               `1W: ${escape(result.marketState.weeklyTrend)} | 1D: ${escape(result.marketState.dailyTrend)}\n` +
+               `4H: ${escape(clean(result.marketState.h4Trend))} | 1H: ${escape(result.marketState.h1Trend)}\n` +
+               `BTC: 1D ${escape(result.marketState.btcDailyTrend)}, 4H ${escape(result.marketState.btcH4Trend)}\n` +
+               `${t.scores}: ${escape(scoreBreakdown)}\n\n` +
+               `<b>${t.context}</b>\n` +
+               `${escape(this.localizeVolume(result.analysis.volume, locale))}\n` +
+               `${escape(this.localizeRetestStatus(result, locale))}\n` +
+               `${escape(this.localizeTriggerCandle(result.analysis.triggerCandle, locale))}\n` +
+               `${escape(result.analysis.orderFlow)}\n` +
+               `${escape(shorten(result.analysis.derivatives, 260))}\n\n` +
+               `<b>${t.oiWarning}</b>\n${escape(shorten(this.stripOiWarningPrefix(result.analysis.oiWarning), 320))}\n\n` +
+               `<b>${t.warnings}</b>\n${warnings}\n\n` +
+               `<b>${t.setupScenarios}</b>\n${nextConditions}\n\n` +
+               `<i>Rule-based MVP. Not financial advice.</i>`;
+    }
+
+    private getAnalysisLabels(locale: 'ru' | 'en') {
+        if (locale === 'ru') {
+            return {
+                decision: 'Решение',
+                directionalBias: 'Технический bias',
+                setupQuality: 'Качество входа',
+                riskScore: 'Risk Score',
+                tradeConfidence: 'Уверенность сделки',
+                tradeConfidenceNa: 'N/A - нет валидной сделки при WAIT',
+                summary: 'Кратко',
+                currentAction: 'Текущее действие',
+                tradePlan: 'План сделки',
+                entryStatus: 'Статус входа',
+                noActiveSetup: 'Активной сделки нет. Текущая цена:',
+                missedRetestZone: 'Пропущенная зона ретеста',
+                referenceZone: 'Reference-зона',
+                noEntryWhileWait: 'Нет entry/SL/TP пока decision = WAIT.',
+                entry: 'Entry',
+                zone: 'Zone',
+                current: 'Current',
+                riskManagement: 'Risk Management',
+                stop: 'Stop',
+                whyNotNow: 'Почему не входим сейчас',
+                requiredEntry: 'Что нужно для R/R >= 1.8',
+                marketState: 'Состояние рынка',
+                context: 'Контекст',
+                oiWarning: 'OI-предупреждение',
+                warnings: 'Предупреждения',
+                setupScenarios: 'Сценарии',
+                regime: 'Режим',
+                scores: 'Scores'
+            };
+        }
+
+        return {
+            decision: 'Decision',
+            directionalBias: 'Technical Directional Bias',
+            setupQuality: 'Trade Setup Quality',
+            riskScore: 'Risk Score',
+            tradeConfidence: 'Trade Confidence',
+            tradeConfidenceNa: 'N/A - no valid trade setup while decision is WAIT',
+            summary: 'Summary',
+            currentAction: 'Current Action',
+            tradePlan: 'Trade Plan',
+            entryStatus: 'Entry Status',
+            noActiveSetup: 'No active trade setup. Current price:',
+            missedRetestZone: 'Missed Retest Zone',
+            referenceZone: 'Reference Zone',
+            noEntryWhileWait: 'No entry/SL/TP while decision is WAIT.',
+            entry: 'Entry',
+            zone: 'Zone',
+            current: 'Current',
+            riskManagement: 'Risk Management',
+            stop: 'Stop',
+            whyNotNow: 'Why Not Now',
+            requiredEntry: 'Required Entry For Valid R/R',
+            marketState: 'Market State',
+            context: 'Context',
+            oiWarning: 'OI Warning',
+            warnings: 'Warnings',
+            setupScenarios: 'Setup Scenarios',
+            regime: 'Regime',
+            scores: 'Scores'
+        };
+    }
+
+    private sanitizeReportText(text: string): string {
+        return text
+            .replace(/\*\*/g, '')
+            .replace(/\*/g, '')
+            .replace(/#{1,6}\s?/g, '')
+            .replace(/`/g, '')
+            .replace(/^\s*[-•]\s+/gm, '')
+            .trim();
+    }
+
+    private shortenText(value: string, max: number): string {
+        if (value.length <= max) return value;
+        const slice = value.slice(0, max - 3);
+        const sentenceEnd = Math.max(slice.lastIndexOf('.'), slice.lastIndexOf('!'), slice.lastIndexOf('?'));
+        if (sentenceEnd > max * 0.55) return slice.slice(0, sentenceEnd + 1);
+        const lastSpace = slice.lastIndexOf(' ');
+        return `${slice.slice(0, lastSpace > 0 ? lastSpace : max - 3)}...`;
+    }
+
+    private stripOiWarningPrefix(text: string): string {
+        return text.replace(/^OI Warning:\s*/i, '');
+    }
+
+    private buildLocalizedAction(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        const isLong = result.bias === 'BULLISH';
+        const breakoutLevel = result.riskManagement.nearestBlockingLevel;
+        const requiredEntry = result.riskManagement.requiredEntryForMinRr;
+
+        if (locale === 'ru') {
+            const pullback = requiredEntry
+                ? `Long становится валидным только если цена возвращается в зону, где расчётный R/R >= 1.8. По текущей геометрии это не выше ${requiredEntry}.`
+                : 'Long становится валидным только если цена возвращается в зону, где расчётный R/R >= 1.8.';
+            const breakout = breakoutLevel
+                ? `4H закрывается выше ${breakoutLevel}, затем уровень ретестится как поддержка.`
+                : '4H пробивает ключевой уровень, затем уровень ретестится.';
+            return `Сделки нет.\n\n${isLong ? 'Long' : 'Short'} валиден только если:\n• ${pullback}\n• Или ${breakout}\n• CVD продолжает расти, delta остаётся положительной, bearish divergence не появляется.\n• USDT.D не пробивает диапазон вверх и не показывает risk-off ускорение.`;
+        }
+
+        const pullback = requiredEntry
+            ? `Pullback gives R/R >= 1.8 around ${requiredEntry}.`
+            : 'Pullback gives R/R >= 1.8.';
+        const breakout = breakoutLevel
+            ? `4H closes above ${breakoutLevel}, then retests it as support.`
+            : '4H breaks the key level, then retests it.';
+        return `No trade.\n\nValid ${isLong ? 'Long' : 'Short'} Only If:\n• ${pullback}\n• Or ${breakout}\n• CVD keeps confirming.\n• USDT.D does not move against the scenario.`;
+    }
+
+    private getEntryStatusText(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        const status = result.riskManagement.currentEntryStatus || 'NO_TRADE';
+        if (locale === 'ru') {
+            if (status === 'MISSED_RETEST') return 'ПРОПУЩЕН';
+            if (status === 'TOO_LATE') return 'ПОЗДНИЙ';
+            if (status === 'VALID') return 'ВАЛИДЕН';
+            if (status === 'WAITING_RETEST') return 'ОЖИДАЕТ РЕТЕСТ';
+            return 'НЕТ СДЕЛКИ';
+        }
+        return status.replace(/_/g, ' ');
+    }
+
+    private localizeRetestEntryComment(result: AnalysisResult, locale: 'ru' | 'en'): string | undefined {
+        if (!result.riskManagement.retestEntryComment) return undefined;
+        if (locale !== 'ru') return result.riskManagement.retestEntryComment;
+        const level = result.riskManagement.retestLevel;
+        const rr = result.riskManagement.riskReward?.toFixed(2) || 'n/a';
+        return `Ретест был подтверждён около ${level || 'уровня'}, но цена ушла выше зоны ретеста, а R/R ухудшился до ${rr}.`;
+    }
+
+    private localizeVolume(text: string, locale: 'ru' | 'en'): string {
+        if (locale !== 'ru') return text;
+        const ratio = text.match(/([0-9.]+)x average/)?.[1] || 'n/a';
+        const signal = text.match(/\(([^)]+)\)/)?.[1] || 'NORMAL';
+        const trend = text.match(/trend ([A-Z]+)/)?.[1] || 'FLAT';
+        return `4H объём ${ratio}x от среднего (${signal}), тренд ${trend}.`;
+    }
+
+    private localizeRetestStatus(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        if (locale !== 'ru') return result.analysis.retestStatus;
+        if (result.riskManagement.missedRetestEntry) {
+            const level = result.riskManagement.retestLevel || 'уровня';
+            return `Статус ретеста: подтверждён, но вход пропущен. Цена ушла выше зоны ретеста около ${level}.`;
+        }
+        return result.analysis.retestStatus.replace('Retest Status:', 'Статус ретеста:');
+    }
+
+    private localizeTriggerCandle(text: string, locale: 'ru' | 'en'): string {
+        if (locale !== 'ru') return text;
+        return text
+            .replace('bullish rejection from lower prices', 'бычий откуп от нижних цен')
+            .replace('bearish rejection from higher prices', 'медвежий отказ от верхних цен')
+            .replace('body', 'тело')
+            .replace('close location', 'закрытие в диапазоне')
+            .replace('volume', 'объём');
+    }
+
+    private buildLocalizedWarnings(result: AnalysisResult, locale: 'ru' | 'en'): string[] {
+        if (locale !== 'ru') return result.warnings;
+
+        const warnings: string[] = [];
+        if (result.riskManagement.nearestBlockingLevel) {
+            warnings.push(`Ближайшее сопротивление ${result.riskManagement.nearestBlockingLevel} ограничивает потенциальный TP-path; при WAIT активный TP не выставляется.`);
+        }
+        if (result.setupReason.includes('premium')) {
+            warnings.push('Long находится в premium-зоне, риск догонять цену повышен.');
+        }
+        warnings.push('Trigger candle поддерживает направление, но для входа всё ещё нужны объём и приемлемый R/R.');
+        return warnings;
+    }
+
+    private buildLocalizedScenarios(result: AnalysisResult, locale: 'ru' | 'en'): string[] {
+        if (locale !== 'ru') return result.nextConditions;
+
+        const level = result.riskManagement.nearestBlockingLevel;
+        const required = result.riskManagement.requiredEntryForMinRr;
+        const support = result.riskManagement.requiredEntryForMinRr;
+        const scenarios: string[] = [];
+        if (level) {
+            scenarios.push(`Breakout LONG activation: 4H close выше ${level} + объём > 1.5x + CVD продолжает расти. Это ещё не вход.`);
+            scenarios.push(`Breakout LONG entry: ждать ретест ${level} как поддержки; вход только если R/R после ретеста >= 1.8.`);
+        }
+        if (required) {
+            scenarios.push(`Pullback LONG: preferred zone около ${support}, где текущая stop/target-геометрия может дать R/R >= 1.8. Старая retest/reference zone валидна снова только при новой локальной структуре.`);
+        }
+        return scenarios;
+    }
+
+    private buildLocalizedWhyNotNow(result: AnalysisResult, locale: 'ru' | 'en'): string[] {
+        if (locale !== 'ru') return result.whyNotNow;
+
+        const reasons: string[] = [];
+        const rr = result.riskManagement.riskReward?.toFixed(2) || 'n/a';
+        reasons.push(`R/R сейчас ${rr}, минимум для сделки 1.8.`);
+
+        if (result.marketRegimeDetails.rangePosition === 'HIGH' || result.setupReason.includes('premium')) {
+            reasons.push('Цена находится в premium/верхней части диапазона.');
+        }
+        if (result.riskManagement.nearestBlockingLevel) {
+            reasons.push(`Ближайшее сопротивление ${result.riskManagement.nearestBlockingLevel} блокирует чистый путь к TP.`);
+        }
+        if (result.riskManagement.missedRetestEntry) {
+            reasons.push('Ретест был подтверждён, но текущий вход уже пропущен.');
+        }
+        const volumeMatch = result.analysis.volume.match(/([0-9.]+)x average/);
+        if (volumeMatch) {
+            reasons.push(`Объём только ${volumeMatch[1]}x от среднего, нет сильного подтверждения пробоя.`);
+        }
+
+        return reasons;
+    }
+
+    private buildLocalizedRequiredEntry(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        if (locale !== 'ru') return result.analysis.requiredEntry;
+        const required = result.riskManagement.requiredEntryForMinRr;
+        const level = result.riskManagement.nearestBlockingLevel;
+        if (required && level) {
+            return `Для R/R >= 1.8 long-вход должен быть не выше ${required}, либо нужно пробить ${level} и сформировать новый чистый путь к TP после ретеста. Старая зона ретеста выше этого уровня невалидна по текущей R/R-геометрии без новой локальной структуры.`;
+        }
+        if (required) {
+            return `Для R/R >= 1.8 вход должен быть около ${required} или лучше.`;
+        }
+        return 'Нужен откат или новый пробой/ретест, чтобы R/R стал >= 1.8.';
     }
 
     // --- CHANNEL BROADCAST METHODS (NEW) ---
@@ -292,7 +609,7 @@ export class TelegramService {
                 context =
                     `\n⚡ Funding: *${(stats.fundingRate * 100).toFixed(4)}%*` +
                     `\n📊 OI: *${this.formatCompactMoney(stats.openInterest)}*` +
-                    `\n⚖️ L/S Ratio: *${stats.longShortRatio.toFixed(2)}*`;
+                    `\n⚖️ Positioning: *${this.formatPositioning(stats.longShortRatio)}*`;
             }
         } catch (error) {
             console.error(`[${alert.symbol}] Failed to fetch liquidation context:`, error);
@@ -490,13 +807,11 @@ export class TelegramService {
             return;
         }
 
-        let sentiment = 'Neutral 😐';
-        if (stats.longShortRatio > 2.5) sentiment = 'Over-longed (Bearish) 🐻';
-        else if (stats.longShortRatio < 0.6) sentiment = 'Over-shorted (Bullish) 🐮';
+        const positioning = this.formatPositioning(stats.longShortRatio);
 
-        const msgText = `⚖️ *${stats.symbol} Long/Short Ratio (Top Traders)*\n\n` +
-                        `Ratio: *${stats.longShortRatio.toFixed(2)}*\n` +
-                        `Sentiment: ${sentiment}`;
+        const msgText = `⚖️ *${stats.symbol} Top Trader Positioning*\n\n` +
+                        `Positioning: *${positioning}*\n\n` +
+                        `_Above 1.0 means more long accounts; below 1.0 means more short accounts._`;
 
         await this.bot.sendMessage(chatId, msgText, { parse_mode: 'Markdown' });
     }
@@ -528,6 +843,27 @@ export class TelegramService {
     }
 
     // --- STANDARD HANDLERS ---
+
+    private async handleAnalyze(msg: Message, match: RegExpExecArray | null): Promise<void> {
+        const chatId = msg.chat.id;
+        const symbol = match?.[1]?.trim();
+        if (!symbol) {
+            await this.bot.sendMessage(chatId, 'Usage: /analyze SOLUSDT');
+            return;
+        }
+
+        await this.bot.sendMessage(chatId, `🔎 Analyzing *${symbol.toUpperCase()}* on 4H...`, { parse_mode: 'Markdown' });
+
+        try {
+            const user = await this.dbService.getUser(chatId);
+            const locale = user?.locale || 'ru';
+            const result = await this.analysisService.analyze(symbol, locale);
+            await this.sendMessage(chatId, this.formatAnalysisResult(result, locale), { parse_mode: 'HTML' });
+        } catch (error: any) {
+            console.error(`Failed to analyze ${symbol}:`, error);
+            await this.bot.sendMessage(chatId, `Analysis failed: ${error.message || 'unknown error'}`);
+        }
+    }
 
     private async handleStatus(msg: Message): Promise<void> {
         const chatId = msg.chat.id;
@@ -678,13 +1014,15 @@ export class TelegramService {
         if (!user) return;
 
         const muteButtonText = user.notificationsEnabled ? '🔇 Mute Alerts' : '🔊 Unmute Alerts';
-        const text = '⚙️ *Settings*\n\nChoose what you want to configure:';
+        const localeText = user.locale === 'en' ? '🇬🇧 English' : '🇷🇺 Русский';
+        const text = `⚙️ *Settings*\n\nCurrent analysis language: *${localeText}*\n\nChoose what you want to configure:`;
         const options = {
             parse_mode: 'Markdown' as const,
             reply_markup: {
                 inline_keyboard: [
                     [{ text: '⏰ Report Interval', callback_data: 'menu:interval' }],
                     [{ text: '💰 Alert Threshold', callback_data: 'menu:threshold' }],
+                    [{ text: `🌐 Analysis Language: ${localeText}`, callback_data: 'menu:language' }],
                     [{ text: muteButtonText, callback_data: 'menu:mute' }],
                     [{ text: '❌ Close', callback_data: 'menu:close' }]
                 ]
@@ -744,6 +1082,28 @@ export class TelegramService {
         await this.bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
     }
 
+    private async showLanguageSettings(chatId: number, messageId: number): Promise<void> {
+        const user = await this.dbService.getUser(chatId);
+        if (!user) return;
+
+        const current = user.locale || 'ru';
+        const text = `Current analysis language: *${current === 'ru' ? 'Русский' : 'English'}*.\n\nSelect language for /analyze reports:`;
+        const keyboard: TelegramBot.InlineKeyboardButton[][] = [
+            [
+                { text: `${current === 'ru' ? '✅ ' : ''}🇷🇺 Русский`, callback_data: 'set_locale:ru' },
+                { text: `${current === 'en' ? '✅ ' : ''}🇬🇧 English`, callback_data: 'set_locale:en' }
+            ],
+            [{ text: '⬅️ Back to Settings', callback_data: 'menu:settings_main' }]
+        ];
+
+        await this.bot.editMessageText(text, {
+            chat_id: chatId,
+            message_id: messageId,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: keyboard }
+        });
+    }
+
     private async handleMessage(msg: Message): Promise<void> {
         const chatId = msg.chat.id;
         // Ignore commands
@@ -773,6 +1133,7 @@ export class TelegramService {
             if (payload === 'pairs') await this.showPairsSettings(chatId, messageId, page);
             else if (payload === 'interval') await this.showIntervalSettings(chatId, messageId);
             else if (payload === 'threshold') await this.showThresholdSettings(chatId, messageId);
+            else if (payload === 'language') await this.showLanguageSettings(chatId, messageId);
             else if (payload === 'settings_main') await this.showMainSettings(chatId, messageId);
             else if (payload === 'close') await this.deleteMessage(chatId, messageId);
             else if (payload === 'mute') {
@@ -803,6 +1164,11 @@ export class TelegramService {
             await this.dbService.updateUserReportInterval(chatId, parseInt(payload));
             await this.showIntervalSettings(chatId, messageId);
             this.bot.sendMessage(chatId, `Report interval updated to ${payload}h.`);
+        } else if (action === 'set_locale') {
+            const locale = payload === 'en' ? 'en' : 'ru';
+            await this.dbService.updateUserLocale(chatId, locale);
+            await this.showLanguageSettings(chatId, messageId);
+            this.bot.sendMessage(chatId, locale === 'ru' ? 'Язык анализа: Русский.' : 'Analysis language: English.');
         }
 
         await this.bot.answerCallbackQuery(query.id);
@@ -880,6 +1246,14 @@ export class TelegramService {
 
     public async sendMessage(chatId: string | number, message: string, options: any = { parse_mode: 'Markdown' }): Promise<void> {
         try {
+            if (message.length > 3900) {
+                const chunks = this.splitTelegramMessage(message, 3800);
+                for (const chunk of chunks) {
+                    await this.bot.sendMessage(chatId, chunk, options);
+                }
+                return;
+            }
+
             await this.bot.sendMessage(chatId, message, options);
         } catch (error: any) {
             if (error.response?.body?.error_code === 403) {
@@ -891,6 +1265,25 @@ export class TelegramService {
                  console.error(`❌ Failed to send to ${chatId}: ${error.message}`);
             }
         }
+    }
+
+    private splitTelegramMessage(message: string, maxLength: number): string[] {
+        const chunks: string[] = [];
+        let current = '';
+
+        for (const line of message.split('\n')) {
+            const next = current ? `${current}\n${line}` : line;
+            if (next.length <= maxLength) {
+                current = next;
+                continue;
+            }
+
+            if (current) chunks.push(current);
+            current = line;
+        }
+
+        if (current) chunks.push(current);
+        return chunks;
     }
 
     private async deleteMessage(chatId: number, messageId: number): Promise<void> {

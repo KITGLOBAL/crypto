@@ -1,6 +1,7 @@
 // src/services/DatabaseService.ts
 
-import { MongoClient, Db, WithId, MongoServerError } from 'mongodb';
+import { MongoClient, Db, WithId, MongoServerError, ObjectId } from 'mongodb';
+import type { AnalysisSnapshot, SignalOutcome } from '../analysis/types';
 
 export interface LiquidationData {
     symbol: string;
@@ -23,6 +24,7 @@ export interface User {
     notificationsEnabled: boolean;
     reportIntervalHours: number;
     minLiquidationAlert: number;
+    locale?: 'ru' | 'en';
     createdAt: Date;
 }
 
@@ -41,6 +43,31 @@ export interface LiquidationSummary {
     orders: number;
 }
 
+export interface DominanceSnapshot {
+    type: 'BTC.D' | 'USDT.D' | 'TOTAL';
+    value: number;
+    timestamp: Date;
+}
+
+export interface AnalysisSignalRecord {
+    symbol: string;
+    timeframe: string;
+    decision: 'LONG' | 'SHORT' | 'WAIT';
+    score: number;
+    confidence: number;
+    entryFrom?: number;
+    entryTo?: number;
+    stopLoss?: number;
+    takeProfits?: number[];
+    invalidation?: string;
+    reasoning: string[];
+    warnings: string[];
+    rawAnalysis: object;
+    signalOutcome?: SignalOutcome;
+    strategyVersion: string;
+    createdAt: Date;
+}
+
 export class DatabaseService {
     private client: MongoClient;
     private dbName: string;
@@ -48,6 +75,9 @@ export class DatabaseService {
     
     private readonly usersCollectionName = 'users';
     private readonly liquidationsCollectionName = 'liquidations';
+    private readonly dominanceSnapshotsCollectionName = 'dominance_snapshots';
+    private readonly analysisSignalsCollectionName = 'analysis_signals';
+    private readonly analysisSnapshotsCollectionName = 'analysis_snapshots';
 
     constructor(uri: string, dbName: string) {
         this.client = new MongoClient(uri);
@@ -63,10 +93,17 @@ export class DatabaseService {
             console.log('Ensuring database indexes...');
             const usersCollection = this.db.collection(this.usersCollectionName);
             const liquidationsCollection = this.db.collection(this.liquidationsCollectionName);
+            const dominanceCollection = this.db.collection(this.dominanceSnapshotsCollectionName);
+            const analysisSignalsCollection = this.db.collection(this.analysisSignalsCollectionName);
+            const analysisSnapshotsCollection = this.db.collection(this.analysisSnapshotsCollectionName);
             await usersCollection.createIndex({ chatId: 1 }, { unique: true });
             await usersCollection.createIndex({ notificationsEnabled: 1, trackedSymbols: 1 });
             await liquidationsCollection.createIndex({ symbol: 1, time: -1 });
             await liquidationsCollection.createIndex({ time: -1 });
+            await dominanceCollection.createIndex({ type: 1, timestamp: -1 });
+            await analysisSignalsCollection.createIndex({ symbol: 1, timeframe: 1, createdAt: -1 });
+            await analysisSnapshotsCollection.createIndex({ symbol: 1, timeframe: 1, createdAt: -1 });
+            await analysisSnapshotsCollection.createIndex({ createdAt: -1 });
 
             console.log('✅ Database indexes are in place.');
 
@@ -127,6 +164,7 @@ export class DatabaseService {
             notificationsEnabled: true,
             reportIntervalHours: 4,
             minLiquidationAlert: 10000,
+            locale: 'ru',
             createdAt: new Date(),
         };
 
@@ -203,6 +241,14 @@ export class DatabaseService {
         await collection.updateOne({ chatId }, { $set: { minLiquidationAlert: threshold } });
         const updatedUser = await this.getUser(chatId);
         console.log(`[${chatId}] Updated alert threshold to $${threshold}.`);
+        return updatedUser;
+    }
+
+    public async updateUserLocale(chatId: number, locale: 'ru' | 'en'): Promise<User | null> {
+        const collection = this.db.collection<User>(this.usersCollectionName);
+        await collection.updateOne({ chatId }, { $set: { locale } });
+        const updatedUser = await this.getUser(chatId);
+        console.log(`[${chatId}] Updated locale to ${locale}.`);
         return updatedUser;
     }
 
@@ -319,6 +365,70 @@ export class DatabaseService {
             { $sort: { total: -1 } },
             { $limit: limit }
         ]).toArray();
+    }
+
+    public async saveDominanceSnapshot(snapshot: { btcDominance: number; usdtDominance: number; totalMarketCapUsd: number; createdAt: string }): Promise<void> {
+        const collection = this.db.collection<DominanceSnapshot>(this.dominanceSnapshotsCollectionName);
+        const timestamp = new Date(snapshot.createdAt);
+        await collection.insertMany([
+            { type: 'BTC.D', value: snapshot.btcDominance, timestamp },
+            { type: 'USDT.D', value: snapshot.usdtDominance, timestamp },
+            { type: 'TOTAL', value: snapshot.totalMarketCapUsd, timestamp }
+        ]);
+    }
+
+    public async getDominanceSnapshots(type: DominanceSnapshot['type'], limit: number): Promise<DominanceSnapshot[]> {
+        const collection = this.db.collection<DominanceSnapshot>(this.dominanceSnapshotsCollectionName);
+        const snapshots = await collection.find({ type }).sort({ timestamp: -1 }).limit(limit).toArray();
+        return snapshots.reverse();
+    }
+
+    public async saveAnalysisSignal(signal: AnalysisSignalRecord): Promise<void> {
+        const collection = this.db.collection<AnalysisSignalRecord>(this.analysisSignalsCollectionName);
+        await collection.insertOne(signal);
+    }
+
+    public async saveAnalysisSnapshot(snapshot: AnalysisSnapshot): Promise<void> {
+        const collection = this.db.collection<AnalysisSnapshot>(this.analysisSnapshotsCollectionName);
+        await collection.insertOne(snapshot);
+    }
+
+    public async getAnalysisSnapshots(symbol: string, limit: number = 100): Promise<AnalysisSnapshot[]> {
+        const collection = this.db.collection<AnalysisSnapshot>(this.analysisSnapshotsCollectionName);
+        return collection.find({ symbol }).sort({ createdAt: -1 }).limit(limit).toArray();
+    }
+
+    public async getTrackableAnalysisSignals(symbol: string, timeframe: string, limit: number = 20): Promise<WithId<AnalysisSignalRecord>[]> {
+        const collection = this.db.collection<AnalysisSignalRecord>(this.analysisSignalsCollectionName);
+        return collection.find({
+            symbol,
+            timeframe,
+            decision: { $in: ['LONG', 'SHORT'] },
+            $or: [
+                { signalOutcome: { $exists: false } },
+                { 'signalOutcome.status': 'OPEN' }
+            ]
+        }).sort({ createdAt: -1 }).limit(limit).toArray();
+    }
+
+    public async updateAnalysisSignalOutcome(id: ObjectId, outcome: SignalOutcome): Promise<void> {
+        const collection = this.db.collection<AnalysisSignalRecord>(this.analysisSignalsCollectionName);
+        await collection.updateOne({ _id: id }, {
+            $set: {
+                signalOutcome: outcome,
+                'rawAnalysis.signalOutcome': outcome
+            }
+        });
+    }
+
+    public async getLastAnalysisSignal(symbol: string, timeframe: string): Promise<AnalysisSignalRecord | null> {
+        const collection = this.db.collection<AnalysisSignalRecord>(this.analysisSignalsCollectionName);
+        return collection.find({ symbol, timeframe }).sort({ createdAt: -1 }).limit(1).next();
+    }
+
+    public async getAnalysisSignalHistory(symbol: string, limit: number = 10): Promise<AnalysisSignalRecord[]> {
+        const collection = this.db.collection<AnalysisSignalRecord>(this.analysisSignalsCollectionName);
+        return collection.find({ symbol }).sort({ createdAt: -1 }).limit(limit).toArray();
     }
     
     public async deleteOldLiquidations(olderThan: Date): Promise<number> {

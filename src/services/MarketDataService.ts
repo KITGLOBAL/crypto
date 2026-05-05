@@ -36,6 +36,16 @@ export interface AssetStats {
     longShortRatio: number;
 }
 
+export interface FundingHistoryPoint {
+    fundingTime: number;
+    fundingRate: number;
+}
+
+export interface OpenInterestHistoryPoint {
+    timestamp: number;
+    openInterestUsd: number;
+}
+
 interface FundingItem {
     symbol: string;
     exchange: string;
@@ -281,6 +291,44 @@ export class MarketDataService {
                 return null; 
             }
         }, 120);
+    }
+
+    public async getFundingHistory(symbol: string, limit: number = 90): Promise<FundingHistoryPoint[]> {
+        const s = `${this.normalizeSymbol(symbol)}USDT`;
+        return this.redis.getOrFetch<FundingHistoryPoint[]>(`funding_history_v1:${s}:${limit}`, async () => {
+            try {
+                const data = await this.fetchJson(`${this.binanceBaseUrl}/fapi/v1/fundingRate?symbol=${s}&limit=${limit}`);
+                if (!Array.isArray(data)) return [];
+                return data
+                    .map((item: any) => ({
+                        fundingTime: Number(item.fundingTime || 0),
+                        fundingRate: safeFloat(item.fundingRate)
+                    }))
+                    .filter((item: FundingHistoryPoint) => item.fundingTime > 0);
+            } catch (e: any) {
+                console.error(`❌ Error fetching funding history for ${s}:`, e.message);
+                return [];
+            }
+        }, 1800);
+    }
+
+    public async getOpenInterestHistory(symbol: string, period: '5m' | '15m' | '30m' | '1h' | '2h' | '4h' | '6h' | '12h' | '1d' = '4h', limit: number = 60): Promise<OpenInterestHistoryPoint[]> {
+        const s = `${this.normalizeSymbol(symbol)}USDT`;
+        return this.redis.getOrFetch<OpenInterestHistoryPoint[]>(`oi_history_v1:${s}:${period}:${limit}`, async () => {
+            try {
+                const data = await this.fetchJson(`${this.binanceBaseUrl}/futures/data/openInterestHist?symbol=${s}&period=${period}&limit=${limit}`);
+                if (!Array.isArray(data)) return [];
+                return data
+                    .map((item: any) => ({
+                        timestamp: Number(item.timestamp || 0),
+                        openInterestUsd: safeFloat(item.sumOpenInterestValue)
+                    }))
+                    .filter((item: OpenInterestHistoryPoint) => item.timestamp > 0 && item.openInterestUsd > 0);
+            } catch (e: any) {
+                console.error(`❌ Error fetching OI history for ${s}:`, e.message);
+                return [];
+            }
+        }, 900);
     }
 
     public async getTopFundingRates(limit: number = 5): Promise<{ high: FundingItem[], low: FundingItem[] }> {

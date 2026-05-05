@@ -131,3 +131,32 @@ export const SYMBOLS_TO_TRACK: string[] = [
     'CAKEUSDT', // PancakeSwap: DeFi DEX
     'CFXUSDT'  // Conflux: High-throughput blockchain
 ];
+
+export const ANALYSIS_TOP_SYMBOLS = [
+    'BTCUSDT',
+    'ETHUSDT',
+    'BNBUSDT',
+    'SOLUSDT',
+    'XRPUSDT',
+    'DOGEUSDT',
+    'ADAUSDT',
+    'TRXUSDT',
+    'AVAXUSDT',
+    'LINKUSDT',
+    'LTCUSDT',
+    'DOTUSDT',
+    'NEARUSDT',
+    'UNIUSDT',
+    'ICPUSDT',
+    'APTUSDT',
+    'SUIUSDT',
+    'FETUSDT',
+    'HBARUSDT',
+    'XLMUSDT'
+];
+
+export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+export const ANALYSIS_AI_SUMMARY_ENABLED = process.env.ANALYSIS_AI_SUMMARY_ENABLED === 'true';
+export const ANALYSIS_AI_MODEL = process.env.ANALYSIS_AI_MODEL || 'gpt-4o-mini';
+export const ANALYSIS_SNAPSHOT_ENABLED = process.env.ANALYSIS_SNAPSHOT_ENABLED !== 'false';
+export const ANALYSIS_SNAPSHOT_CRON = process.env.ANALYSIS_SNAPSHOT_CRON || '20 * * * *';

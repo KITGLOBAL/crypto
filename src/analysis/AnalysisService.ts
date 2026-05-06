@@ -1,12 +1,13 @@
 import { ANALYSIS_AI_MODEL, ANALYSIS_AI_SUMMARY_ENABLED, ANALYSIS_TOP_SYMBOLS, OPENAI_API_KEY } from '../config';
-import { AnalysisResult, AnalysisSnapshot, Candle, DerivativesAnalysis, RetestAnalysis, SignalOutcome, Timeframe } from './types';
+import { ActionableEntryZone, AnalysisResult, AnalysisSnapshot, Candle, DerivativesAnalysis, RetestAnalysis, RiskManagementPlan, SetupExpirationReason, SignalOutcome, Timeframe } from './types';
 import { CandleService } from './data/CandleService';
 import { DominanceService } from './data/DominanceService';
 import { DerivativesService } from './data/DerivativesService';
 import { TechnicalAnalyzers } from './analyzers/TechnicalAnalyzers';
 import { OrderFlowAnalyzer } from './analyzers/OrderFlowAnalyzer';
 import { ScoringEngine } from './analyzers/ScoringEngine';
-import { DatabaseService } from '../services/DatabaseService';
+import { TacticalEntryAnalyzer } from './analyzers/TacticalEntryAnalyzer';
+import { ActionableSetupRecord, DatabaseService } from '../services/DatabaseService';
 import { RedisService } from '../services/RedisService';
 import { MarketDataService } from '../services/MarketDataService';
 
@@ -17,6 +18,7 @@ export class AnalysisService {
     private technicalAnalyzers = new TechnicalAnalyzers();
     private orderFlowAnalyzer = new OrderFlowAnalyzer();
     private scoringEngine = new ScoringEngine();
+    private tacticalEntryAnalyzer = new TacticalEntryAnalyzer();
     private readonly strategyVersion = 'analysis-mvp-v1';
 
     constructor(
@@ -63,14 +65,20 @@ export class AnalysisService {
         const h4Structure = this.technicalAnalyzers.analyzeMarketStructure(assetCandles['4h']);
         const h4Levels = this.technicalAnalyzers.analyzeLevels(assetCandles['4h'], '4h', currentPrice);
         const h4Atr = this.technicalAnalyzers.analyzeAtr(assetCandles['4h']);
+        const h1Structure = this.technicalAnalyzers.analyzeMarketStructure(assetCandles['1h']);
+        const h1Levels = this.technicalAnalyzers.analyzeLevels(assetCandles['1h'], '1h', currentPrice);
+        const h1Atr = this.technicalAnalyzers.analyzeAtr(assetCandles['1h']);
         const btcDailyTrend = this.technicalAnalyzers.analyzeTrend(btcCandles['1d']);
         const btcH4Trend = this.technicalAnalyzers.analyzeTrend(btcCandles['4h']);
         const derivatives = await this.derivativesService.analyze(symbol, assetCandles['4h']);
         const orderFlow = this.orderFlowAnalyzer.analyze(assetCandles['4h']);
+        const h1OrderFlow = this.orderFlowAnalyzer.analyze(assetCandles['1h']);
 
         const preliminaryBias = h4Structure.structure === 'BEARISH_STRUCTURE' ? -1 : 1;
         const volume = this.technicalAnalyzers.analyzeVolume(assetCandles['4h'], preliminaryBias);
+        const h1Volume = this.technicalAnalyzers.analyzeVolume(assetCandles['1h'], preliminaryBias);
         const triggerCandle = this.technicalAnalyzers.analyzeTriggerCandle(assetCandles['4h'], volume);
+        const h1TriggerCandle = this.technicalAnalyzers.analyzeTriggerCandle(assetCandles['1h'], h1Volume);
         const retest = this.technicalAnalyzers.analyzeRetest(assetCandles['4h'], h4Levels);
         const marketRegimeAnalysis = this.technicalAnalyzers.analyzeMarketRegime(assetCandles['4h'], h4Structure, h4Levels, volume);
 
@@ -93,6 +101,31 @@ export class AnalysisService {
             triggerCandle,
             retest,
             marketRegimeAnalysis
+        });
+        const actionableEntryZone = await this.resolveActionableEntryZoneLifecycle(
+            symbol,
+            scored.actionableEntryZone,
+            currentPrice,
+            scored.riskManagement,
+            assetCandles['4h']
+        );
+        const tacticalSetup = this.tacticalEntryAnalyzer.analyze({
+            symbol,
+            currentPrice,
+            mainDecision: scored.decision,
+            primaryScenario: scored.primaryScenario,
+            directionScore: scored.directionScore,
+            entry: scored.entry,
+            riskManagement: scored.riskManagement,
+            h1Trend,
+            h1Structure,
+            h1Levels,
+            h1Atr,
+            h1TriggerCandle,
+            h1OrderFlow,
+            usdtDominance: marketContext.usdtDominance,
+            h4Invalidation: scored.riskManagement.scenarioInvalidation,
+            actionableEntryZone
         });
         if (updateSignalTracking) {
             await this.updatePostSignalTracking(symbol, assetCandles['4h']);
@@ -140,6 +173,9 @@ export class AnalysisService {
                 btcH4Trend: btcH4Trend.trend
             },
             entry: scored.entry,
+            dynamicReferenceZone: scored.dynamicReferenceZone,
+            actionableEntryZone,
+            activationLevels: scored.activationLevels,
             riskManagement: scored.riskManagement,
             analysis: {
                 htfContext: `Weekly ${weeklyTrend.trend}, daily ${dailyTrend.trend}.`,
@@ -167,6 +203,7 @@ export class AnalysisService {
             bias: scored.bias,
             reasonForDecision: scored.reasonForDecision,
             signalOutcome,
+            tacticalSetup,
             createdAt: new Date().toISOString(),
             strategyVersion: this.strategyVersion
         };
@@ -222,13 +259,19 @@ export class AnalysisService {
         const h4Structure = this.technicalAnalyzers.analyzeMarketStructure(assetCandles['4h']);
         const h4Levels = this.technicalAnalyzers.analyzeLevels(assetCandles['4h'], '4h', currentPrice);
         const h4Atr = this.technicalAnalyzers.analyzeAtr(assetCandles['4h']);
+        const h1Structure = this.technicalAnalyzers.analyzeMarketStructure(assetCandles['1h']);
+        const h1Levels = this.technicalAnalyzers.analyzeLevels(assetCandles['1h'], '1h', currentPrice);
+        const h1Atr = this.technicalAnalyzers.analyzeAtr(assetCandles['1h']);
         const btcDailyTrend = this.technicalAnalyzers.analyzeTrend(btcCandles['1d']);
         const btcH4Trend = this.technicalAnalyzers.analyzeTrend(btcCandles['4h']);
         const derivatives = await this.derivativesService.analyze(symbol, assetCandles['4h']);
         const orderFlow = this.orderFlowAnalyzer.analyze(assetCandles['4h']);
+        const h1OrderFlow = this.orderFlowAnalyzer.analyze(assetCandles['1h']);
         const preliminaryBias = h4Structure.structure === 'BEARISH_STRUCTURE' ? -1 : 1;
         const volume = this.technicalAnalyzers.analyzeVolume(assetCandles['4h'], preliminaryBias);
+        const h1Volume = this.technicalAnalyzers.analyzeVolume(assetCandles['1h'], preliminaryBias);
         const triggerCandle = this.technicalAnalyzers.analyzeTriggerCandle(assetCandles['4h'], volume);
+        const h1TriggerCandle = this.technicalAnalyzers.analyzeTriggerCandle(assetCandles['1h'], h1Volume);
         const retest = this.technicalAnalyzers.analyzeRetest(assetCandles['4h'], h4Levels);
         const marketRegimeAnalysis = this.technicalAnalyzers.analyzeMarketRegime(assetCandles['4h'], h4Structure, h4Levels, volume);
         const scored = this.scoringEngine.score({
@@ -251,6 +294,31 @@ export class AnalysisService {
             retest,
             marketRegimeAnalysis
         });
+        const actionableEntryZone = await this.resolveActionableEntryZoneLifecycle(
+            symbol,
+            scored.actionableEntryZone,
+            currentPrice,
+            scored.riskManagement,
+            assetCandles['4h']
+        );
+        const tacticalSetup = this.tacticalEntryAnalyzer.analyze({
+            symbol,
+            currentPrice,
+            mainDecision: scored.decision,
+            primaryScenario: scored.primaryScenario,
+            directionScore: scored.directionScore,
+            entry: scored.entry,
+            riskManagement: scored.riskManagement,
+            h1Trend,
+            h1Structure,
+            h1Levels,
+            h1Atr,
+            h1TriggerCandle,
+            h1OrderFlow,
+            usdtDominance: marketContext.usdtDominance,
+            h4Invalidation: scored.riskManagement.scenarioInvalidation,
+            actionableEntryZone
+        });
 
         const snapshot: AnalysisSnapshot = {
             symbol,
@@ -265,6 +333,17 @@ export class AnalysisService {
             riskSide: scored.riskSide,
             setupQuality: scored.setupQuality,
             entryStatus: scored.riskManagement.currentEntryStatus,
+            actionableEntryZoneFrom: actionableEntryZone?.from,
+            actionableEntryZoneTo: actionableEntryZone?.to,
+            actionableEntryZoneStatus: actionableEntryZone?.status,
+            actionableEntryZoneSource: actionableEntryZone?.source,
+            actionableEntryZoneSetupId: actionableEntryZone?.setupId,
+            actionableEntryZoneRr: actionableEntryZone?.rr,
+            actionableEntryZoneTradable: actionableEntryZone?.isTradable,
+            actionableEntryZoneNotTradableReason: actionableEntryZone?.notTradableReason,
+            actionableEntryZoneExpirationReason: actionableEntryZone?.expirationReason,
+            longActivationLevel: scored.activationLevels.long,
+            shortActivationLevel: scored.activationLevels.short,
             riskReward: scored.riskManagement.riskReward,
             requiredEntryForMinRr: scored.riskManagement.requiredEntryForMinRr,
             marketRegime: scored.marketRegime,
@@ -307,6 +386,15 @@ export class AnalysisService {
             usdtDominanceBreakoutStatus: marketContext.usdtDominance.breakoutStatus,
             usdtDominanceScore: marketContext.usdtDominance.score,
             usdtDominanceImpact: marketContext.usdtDominance.signalImpact,
+            tacticalStatus: tacticalSetup.status,
+            tacticalSide: tacticalSetup.side,
+            tacticalZoneFrom: tacticalSetup.zone?.from,
+            tacticalZoneTo: tacticalSetup.zone?.to,
+            tacticalRR: tacticalSetup.rr,
+            tacticalStop: tacticalSetup.stop?.price,
+            tacticalRequiredEntryForMinRr: tacticalSetup.requiredEntryForMinRr,
+            tacticalZoneStatus: tacticalSetup.zoneStatus,
+            tacticalReason: tacticalSetup.reason,
             strategyVersion: this.strategyVersion,
             createdAt: new Date()
         };
@@ -371,6 +459,155 @@ export class AnalysisService {
         }
 
         return `OI Warning: OI increased ${derivatives.oiChange24h.toFixed(2)}% over 24h while price is flat/weak near a key area. This indicates leverage buildup. ${positioning} Avoid entering before confirmation.`;
+    }
+
+    private async resolveActionableEntryZoneLifecycle(
+        symbol: string,
+        candidate: ActionableEntryZone | undefined,
+        currentPrice: number,
+        risk: RiskManagementPlan,
+        h4Candles: Candle[]
+    ): Promise<ActionableEntryZone | undefined> {
+        const active = await this.dbService.getActiveActionableSetup(symbol, '4h');
+        const now = new Date();
+
+        if (active && active.expiresAt <= now) {
+            await this.dbService.updateActionableSetup(active.setupId, {
+                status: 'EXPIRED',
+                expiredReason: 'TIME_EXPIRED',
+                updatedAt: now
+            });
+            if (!candidate) {
+                return undefined;
+            }
+        } else if (!candidate) {
+            if (active) {
+                await this.dbService.updateActionableSetup(active.setupId, {
+                    status: 'EXPIRED',
+                    expiredReason: 'SCENARIO_TURNED_NEUTRAL',
+                    updatedAt: now
+                });
+            }
+            return undefined;
+        } else if (active && active.setupId === candidate.setupId) {
+            const status = this.calculateActionableZoneStatus(active, currentPrice, risk);
+            await this.dbService.updateActionableSetup(active.setupId, {
+                status,
+                currentPrice,
+                requiredEntryForMinRr: risk.requiredEntryForMinRr,
+                riskReward: risk.riskReward,
+                stopLoss: risk.stopLoss,
+                target: risk.takeProfit[0],
+                invalidation: risk.invalidation || risk.scenarioInvalidation,
+                updatedAt: now
+            });
+            return this.toActionableEntryZone(active, status);
+        } else if (active && candidate) {
+            await this.dbService.updateActionableSetup(active.setupId, {
+                status: 'EXPIRED',
+                replacedBySetupId: candidate.setupId,
+                expiredReason: this.getReplacementReason(candidate),
+                updatedAt: now
+            });
+        }
+
+        if (!candidate) return undefined;
+
+        const setup = this.buildActionableSetupRecord(symbol, candidate, currentPrice, risk, h4Candles);
+        setup.status = this.calculateActionableZoneStatus(setup, currentPrice, risk);
+        await this.dbService.createActionableSetup(setup);
+        return this.toActionableEntryZone(setup, setup.status);
+    }
+
+    private buildActionableSetupRecord(
+        symbol: string,
+        zone: ActionableEntryZone,
+        currentPrice: number,
+        risk: RiskManagementPlan,
+        h4Candles: Candle[]
+    ): ActionableSetupRecord {
+        const now = new Date();
+        const lastClosedH4 = h4Candles[h4Candles.length - 1];
+        return {
+            setupId: zone.setupId,
+            symbol,
+            timeframe: '4h',
+            side: zone.side,
+            from: Math.min(zone.from, zone.to),
+            to: Math.max(zone.from, zone.to),
+            source: zone.source,
+            status: zone.status,
+            createdAtCandleTime: zone.createdAtCandleTime || new Date(lastClosedH4.closeTime).toISOString(),
+            currentPrice,
+            requiredEntryForMinRr: risk.requiredEntryForMinRr,
+            riskReward: risk.riskReward,
+            stopLoss: risk.stopLoss,
+            target: risk.takeProfit[0],
+            invalidation: risk.invalidation || risk.scenarioInvalidation,
+            createdAt: now,
+            updatedAt: now,
+            expiresAt: new Date(now.getTime() + 72 * 60 * 60 * 1000)
+        };
+    }
+
+    private calculateActionableZoneStatus(
+        zone: Pick<ActionableSetupRecord, 'side' | 'from' | 'to' | 'status'>,
+        currentPrice: number,
+        risk: RiskManagementPlan
+    ): ActionableEntryZone['status'] {
+        if (zone.status === 'EXPIRED') return 'EXPIRED';
+
+        const invalidated = zone.side === 'LONG'
+            ? risk.stopLoss !== undefined && currentPrice <= risk.stopLoss
+            : risk.stopLoss !== undefined && currentPrice >= risk.stopLoss;
+        if (invalidated) return 'INVALIDATED';
+
+        const invalidByRr = zone.side === 'LONG'
+            ? risk.requiredEntryForMinRr !== undefined && risk.requiredEntryForMinRr < zone.from
+            : risk.requiredEntryForMinRr !== undefined && risk.requiredEntryForMinRr > zone.to;
+        if (invalidByRr) return 'INVALID_BY_RR';
+
+        if (currentPrice >= zone.from && currentPrice <= zone.to) return 'IN_ZONE';
+
+        const missed = zone.side === 'LONG'
+            ? currentPrice > zone.to
+            : currentPrice < zone.from;
+        return missed ? 'MISSED' : 'WATCHING';
+    }
+
+    private toActionableEntryZone(
+        setup: Pick<ActionableSetupRecord, 'from' | 'to' | 'side' | 'source' | 'setupId' | 'createdAtCandleTime' | 'expiresAt' | 'riskReward' | 'expiredReason'>,
+        status: ActionableEntryZone['status']
+    ): ActionableEntryZone {
+        return {
+            from: setup.from,
+            to: setup.to,
+            side: setup.side,
+            source: setup.source,
+            status,
+            createdAtCandleTime: setup.createdAtCandleTime,
+            expiresAt: setup.expiresAt.toISOString(),
+            rr: setup.riskReward,
+            isTradable: status === 'IN_ZONE' && setup.riskReward !== undefined && setup.riskReward >= 1.8,
+            notTradableReason: this.getActionableNotTradableReason(status, setup.riskReward),
+            expirationReason: status === 'INVALIDATED' ? 'INVALIDATION_HIT' : undefined,
+            setupId: setup.setupId
+        };
+    }
+
+    private getReplacementReason(candidate: ActionableEntryZone): SetupExpirationReason {
+        return candidate.source === 'BREAKOUT_RETEST_LEVEL' ? 'NEW_BREAKOUT_SETUP' : 'NEW_STRUCTURE_CREATED';
+    }
+
+    private getActionableNotTradableReason(
+        status: ActionableEntryZone['status'],
+        rr?: number
+    ): ActionableEntryZone['notTradableReason'] {
+        if (status === 'INVALIDATED') return 'INVALIDATED';
+        if (status === 'EXPIRED') return 'EXPIRED';
+        if (status !== 'IN_ZONE') return 'NOT_IN_ZONE';
+        if (rr === undefined || rr < 1.8) return 'RR_BELOW_MINIMUM';
+        return undefined;
     }
 
     private async buildAiOrRuleBasedSummary(result: AnalysisResult, locale: 'ru' | 'en'): Promise<string> {

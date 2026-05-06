@@ -1,7 +1,7 @@
 // src/services/DatabaseService.ts
 
 import { MongoClient, Db, WithId, MongoServerError, ObjectId } from 'mongodb';
-import type { AnalysisSnapshot, SignalOutcome } from '../analysis/types';
+import type { ActionableEntryZone, AnalysisSnapshot, SetupExpirationReason, SignalOutcome } from '../analysis/types';
 
 export interface LiquidationData {
     symbol: string;
@@ -68,6 +68,30 @@ export interface AnalysisSignalRecord {
     createdAt: Date;
 }
 
+export interface ActionableSetupRecord {
+    setupId: string;
+    symbol: string;
+    timeframe: '4h';
+    side: ActionableEntryZone['side'];
+    from: number;
+    to: number;
+    source: ActionableEntryZone['source'];
+    status: ActionableEntryZone['status'];
+    createdAtCandleTime: string;
+    currentPrice: number;
+    requiredEntryForMinRr?: number;
+    riskReward?: number;
+    stopLoss?: number;
+    target?: number;
+    invalidation?: string;
+    reason?: string;
+    replacedBySetupId?: string;
+    expiredReason?: SetupExpirationReason;
+    createdAt: Date;
+    updatedAt: Date;
+    expiresAt: Date;
+}
+
 export class DatabaseService {
     private client: MongoClient;
     private dbName: string;
@@ -78,6 +102,7 @@ export class DatabaseService {
     private readonly dominanceSnapshotsCollectionName = 'dominance_snapshots';
     private readonly analysisSignalsCollectionName = 'analysis_signals';
     private readonly analysisSnapshotsCollectionName = 'analysis_snapshots';
+    private readonly actionableSetupsCollectionName = 'actionable_setups';
 
     constructor(uri: string, dbName: string) {
         this.client = new MongoClient(uri);
@@ -96,6 +121,7 @@ export class DatabaseService {
             const dominanceCollection = this.db.collection(this.dominanceSnapshotsCollectionName);
             const analysisSignalsCollection = this.db.collection(this.analysisSignalsCollectionName);
             const analysisSnapshotsCollection = this.db.collection(this.analysisSnapshotsCollectionName);
+            const actionableSetupsCollection = this.db.collection(this.actionableSetupsCollectionName);
             await usersCollection.createIndex({ chatId: 1 }, { unique: true });
             await usersCollection.createIndex({ notificationsEnabled: 1, trackedSymbols: 1 });
             await liquidationsCollection.createIndex({ symbol: 1, time: -1 });
@@ -104,6 +130,9 @@ export class DatabaseService {
             await analysisSignalsCollection.createIndex({ symbol: 1, timeframe: 1, createdAt: -1 });
             await analysisSnapshotsCollection.createIndex({ symbol: 1, timeframe: 1, createdAt: -1 });
             await analysisSnapshotsCollection.createIndex({ createdAt: -1 });
+            await actionableSetupsCollection.createIndex({ setupId: 1 }, { unique: true });
+            await actionableSetupsCollection.createIndex({ symbol: 1, timeframe: 1, status: 1, updatedAt: -1 });
+            await actionableSetupsCollection.createIndex({ expiresAt: 1 });
 
             console.log('✅ Database indexes are in place.');
 
@@ -391,6 +420,32 @@ export class DatabaseService {
     public async saveAnalysisSnapshot(snapshot: AnalysisSnapshot): Promise<void> {
         const collection = this.db.collection<AnalysisSnapshot>(this.analysisSnapshotsCollectionName);
         await collection.insertOne(snapshot);
+    }
+
+    public async getActiveActionableSetup(symbol: string, timeframe: '4h'): Promise<WithId<ActionableSetupRecord> | null> {
+        const collection = this.db.collection<ActionableSetupRecord>(this.actionableSetupsCollectionName);
+        return collection.find({
+            symbol,
+            timeframe,
+            status: { $nin: ['INVALIDATED', 'EXPIRED'] }
+        }).sort({ updatedAt: -1 }).limit(1).next();
+    }
+
+    public async createActionableSetup(setup: ActionableSetupRecord): Promise<void> {
+        const collection = this.db.collection<ActionableSetupRecord>(this.actionableSetupsCollectionName);
+        await collection.updateOne(
+            { setupId: setup.setupId },
+            { $set: setup },
+            { upsert: true }
+        );
+    }
+
+    public async updateActionableSetup(setupId: string, patch: Partial<ActionableSetupRecord>): Promise<void> {
+        const collection = this.db.collection<ActionableSetupRecord>(this.actionableSetupsCollectionName);
+        await collection.updateOne(
+            { setupId },
+            { $set: { ...patch, updatedAt: patch.updatedAt || new Date() } }
+        );
     }
 
     public async getAnalysisSnapshots(symbol: string, limit: number = 100): Promise<AnalysisSnapshot[]> {

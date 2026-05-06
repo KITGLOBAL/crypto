@@ -1,7 +1,10 @@
 import {
     AtrAnalysis,
+    ActionableEntryZone,
+    ActivationLevels,
     CategoryScore,
     Decision,
+    DynamicReferenceZone,
     EntryPlan,
     LevelsAnalysis,
     MarketContextAnalysis,
@@ -49,6 +52,9 @@ export type ScoringOutput = {
     confidence: number;
     tradeConfidence: number | null;
     entry: EntryPlan;
+    dynamicReferenceZone?: DynamicReferenceZone;
+    actionableEntryZone?: ActionableEntryZone;
+    activationLevels: ActivationLevels;
     riskManagement: RiskManagementPlan;
     categoryScores: CategoryScore[];
     reasoning: string[];
@@ -228,6 +234,9 @@ export class ScoringEngine {
         const reasonForDecision = this.buildReasonForDecision(decision, primaryScenario, riskSide, directionScore, setupQuality, setupQualityScore, riskScore, risk.riskManagement.riskReward);
         const whyNotNow = this.buildWhyNotNow(primaryScenario, riskSide, input, risk.riskManagement);
         const mainReason = this.buildMainReason(primaryScenario, riskSide, input, risk.riskManagement);
+        const dynamicReferenceZone = this.buildDynamicReferenceZone(risk.entry);
+        const activationLevels = this.buildActivationLevels(input);
+        const actionableEntryZone = this.buildActionableEntryZone(primaryScenario, riskSide, input, risk.riskManagement);
         const currentAction = decision === 'WAIT'
             ? 'No trade. Wait for pullback with acceptable R/R or breakout activation followed by retest confirmation.'
             : `${decision} setup is active; use the trade plan and invalidation rules.`;
@@ -238,6 +247,9 @@ export class ScoringEngine {
             confidence,
             tradeConfidence,
             entry: risk.entry,
+            dynamicReferenceZone,
+            actionableEntryZone,
+            activationLevels,
             riskManagement: risk.riskManagement,
             categoryScores: categories,
             reasoning,
@@ -637,6 +649,86 @@ export class ScoringEngine {
                 breakoutRetestTradeStop: nearestSupport ? `Breakdown retest stop should be above reclaimed/retested level ${nearestSupport} after it holds as resistance.` : 'Breakdown retest stop should be above the retested breakdown level.'
             },
             warnings
+        };
+    }
+
+    private buildDynamicReferenceZone(entry: EntryPlan): DynamicReferenceZone | undefined {
+        if (entry.from === undefined || entry.to === undefined) return undefined;
+        return {
+            from: Math.min(entry.from, entry.to),
+            to: Math.max(entry.from, entry.to),
+            basis: 'CURRENT_PRICE_ATR',
+            purpose: 'INFORMATIONAL_ONLY'
+        };
+    }
+
+    private buildActivationLevels(input: ScoringInput): ActivationLevels {
+        return {
+            long: input.h4Levels.nearestResistance?.price,
+            short: input.h4Levels.nearestSupport?.price
+        };
+    }
+
+    private buildActionableEntryZone(primaryScenario: PrimaryScenario, side: TradeSide, input: ScoringInput, risk: RiskManagementPlan): ActionableEntryZone | undefined {
+        if (primaryScenario === 'NEUTRAL') return undefined;
+        const atr = input.h4Atr.atr14;
+        if (!atr || atr <= 0) return undefined;
+
+        const level = side === 'LONG'
+            ? input.retest.state === 'CONFIRMED' && input.retest.direction === 'BULLISH' && input.retest.level
+                ? input.retest.level
+                : input.h4Levels.nearestSupport?.price || input.h4Levels.rangeLow
+            : input.retest.state === 'CONFIRMED' && input.retest.direction === 'BEARISH' && input.retest.level
+                ? input.retest.level
+                : input.h4Levels.nearestResistance?.price || input.h4Levels.rangeHigh;
+
+        if (!level) return undefined;
+
+        const from = side === 'LONG'
+            ? roundToTick(level - atr * 0.2)
+            : roundToTick(level - atr * 0.15);
+        const to = side === 'LONG'
+            ? roundToTick(level + atr * 0.15)
+            : roundToTick(level + atr * 0.2);
+        const zoneLow = Math.min(from, to);
+        const zoneHigh = Math.max(from, to);
+        const current = input.currentPrice;
+        const required = risk.requiredEntryForMinRr;
+        const invalidByRr = side === 'LONG'
+            ? Boolean(required && required < zoneLow)
+            : Boolean(required && required > zoneHigh);
+        const invalidated = side === 'LONG'
+            ? Boolean(risk.stopLoss && current <= risk.stopLoss)
+            : Boolean(risk.stopLoss && current >= risk.stopLoss);
+        const inZone = current >= zoneLow && current <= zoneHigh;
+        const missed = side === 'LONG' ? current > zoneHigh : current < zoneLow;
+        const status: ActionableEntryZone['status'] = invalidated
+            ? 'INVALIDATED'
+            : invalidByRr
+                ? 'INVALID_BY_RR'
+                : inZone
+                    ? 'IN_ZONE'
+                    : missed
+                        ? 'MISSED'
+                        : 'WATCHING';
+        const source: ActionableEntryZone['source'] = input.retest.state === 'CONFIRMED'
+            ? 'BREAKOUT_RETEST_LEVEL'
+            : side === 'LONG'
+                ? input.h4Levels.nearestSupport ? 'STRUCTURAL_SUPPORT' : 'RANGE_LOW'
+                : input.h4Levels.nearestResistance ? 'STRUCTURAL_RESISTANCE' : 'RANGE_HIGH';
+
+        return {
+            from: zoneLow,
+            to: zoneHigh,
+            side,
+            source,
+            status,
+            rr: risk.riskReward,
+            isTradable: status === 'IN_ZONE' && risk.riskReward !== undefined && risk.riskReward >= 1.8,
+            notTradableReason: status === 'IN_ZONE'
+                ? risk.riskReward !== undefined && risk.riskReward >= 1.8 ? undefined : 'RR_BELOW_MINIMUM'
+                : status === 'INVALIDATED' ? 'INVALIDATED' : 'NOT_IN_ZONE',
+            setupId: `${input.symbol}_4H_${side}_${source}_${roundToTick(level)}`
         };
     }
 

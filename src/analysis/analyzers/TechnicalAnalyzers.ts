@@ -6,6 +6,7 @@ import {
     MarketRegimeAnalysis,
     MarketStructureAnalysis,
     RetestAnalysis,
+    Timeframe,
     TriggerCandleAnalysis,
     TrendAnalysis,
     TrendState,
@@ -113,7 +114,7 @@ export class TechnicalAnalyzers {
         };
     }
 
-    public analyzeLevels(candles: Candle[], timeframe: '1d' | '4h', currentPrice?: number): LevelsAnalysis {
+    public analyzeLevels(candles: Candle[], timeframe: Timeframe, currentPrice?: number): LevelsAnalysis {
         const swings = detectSwings(candles, 3).slice(-40);
         const close = currentPrice && Number.isFinite(currentPrice) && currentPrice > 0
             ? currentPrice

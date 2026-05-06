@@ -180,6 +180,51 @@ export interface EntryPlan {
     currentPrice: number;
 }
 
+export interface DynamicReferenceZone {
+    from: number;
+    to: number;
+    basis: 'CURRENT_PRICE_ATR' | 'CURRENT_PRICE_PERCENT' | 'VOLATILITY_ADJUSTED';
+    purpose: 'INFORMATIONAL_ONLY';
+}
+
+export type SetupExpirationReason =
+    | 'SCENARIO_TURNED_NEUTRAL'
+    | 'NEW_STRUCTURE_CREATED'
+    | 'NEW_BREAKOUT_SETUP'
+    | 'TIME_EXPIRED'
+    | 'MARKET_FILTER_CONFLICT'
+    | 'INVALIDATION_HIT';
+
+export interface ActionableEntryZone {
+    from: number;
+    to: number;
+    side: 'LONG' | 'SHORT';
+    source:
+        | 'STRUCTURAL_SUPPORT'
+        | 'STRUCTURAL_RESISTANCE'
+        | 'BREAKOUT_RETEST_LEVEL'
+        | 'RECLAIM_LEVEL'
+        | 'SWING_LOW'
+        | 'SWING_HIGH'
+        | 'RANGE_LOW'
+        | 'RANGE_HIGH'
+        | 'LOCAL_REACTION';
+    status: 'WATCHING' | 'IN_ZONE' | 'MISSED' | 'INVALID_BY_RR' | 'INVALIDATED' | 'EXPIRED';
+    createdAtCandleTime?: string;
+    expiresAt?: string;
+    rr?: number;
+    isTradable: boolean;
+    notTradableReason?: 'NOT_IN_ZONE' | 'RR_BELOW_MINIMUM' | 'INVALIDATED' | 'EXPIRED';
+    expirationReason?: SetupExpirationReason;
+    replacementReason?: SetupExpirationReason;
+    setupId: string;
+}
+
+export interface ActivationLevels {
+    long?: number;
+    short?: number;
+}
+
 export interface RiskManagementPlan {
     stopLoss?: number;
     takeProfit: number[];
@@ -205,6 +250,40 @@ export interface RiskManagementPlan {
 export type SetupQuality = 'GOOD' | 'ACCEPTABLE' | 'POOR' | 'CHASE';
 export type MarketRegime = 'TRENDING_UP' | 'TRENDING_DOWN' | 'RANGE' | 'COMPRESSION' | 'EXPANSION' | 'DISTRIBUTION' | 'ACCUMULATION' | 'HIGH_VOLATILITY' | 'LOW_VOLATILITY' | 'UNCLEAR';
 export type PrimaryScenario = 'LONG' | 'SHORT' | 'NEUTRAL';
+export type TacticalStatus = 'DISABLED' | 'WATCH' | 'IN_ZONE' | 'CONFIRMATION_PENDING' | 'CONFIRMED' | 'INVALIDATED';
+export type TacticalSide = 'LONG' | 'SHORT' | 'NONE';
+
+export interface TacticalSetup {
+    timeframe: '1h';
+    status: TacticalStatus;
+    side: TacticalSide;
+    reason: string;
+    zone?: {
+        from: number;
+        to: number;
+        source: 'MAIN_REFERENCE_ZONE' | 'REQUIRED_RR_ENTRY' | 'SUPPORT_AREA' | 'RESISTANCE_AREA' | 'PREMIUM_DISCOUNT_ZONE';
+    };
+    rr?: number;
+    requiredEntryForMinRr?: number;
+    zoneStatus?: 'VALID' | 'INVALID_BY_RR' | 'PENDING_RECALCULATION';
+    stop?: {
+        price: number;
+        source: 'LOCAL_1H_LOW' | 'LOCAL_1H_HIGH' | 'REACTION_LOW' | 'REACTION_HIGH';
+    };
+    confirmations: {
+        inZone: boolean;
+        oneHourBos: boolean;
+        reclaimOrRetest: boolean;
+        triggerCandle: boolean;
+        cvdOk: boolean;
+        usdtDominanceOk: boolean;
+        rrOk: boolean;
+        stopDistanceOk: boolean;
+    };
+    waitingFor: string[];
+    invalidation: string[];
+    createdAt: string;
+}
 
 export interface SignalOutcome {
     status: 'OPEN' | 'TP1' | 'TP2' | 'TP3' | 'SL' | 'EXPIRED' | 'NO_TRADE';
@@ -247,6 +326,9 @@ export interface AnalysisResult {
         btcH4Trend: TrendState;
     };
     entry: EntryPlan;
+    dynamicReferenceZone?: DynamicReferenceZone;
+    actionableEntryZone?: ActionableEntryZone;
+    activationLevels: ActivationLevels;
     riskManagement: RiskManagementPlan;
     analysis: {
         htfContext: string;
@@ -274,6 +356,7 @@ export interface AnalysisResult {
     bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
     reasonForDecision: string;
     signalOutcome?: SignalOutcome;
+    tacticalSetup: TacticalSetup;
     createdAt: string;
     strategyVersion: string;
 }
@@ -291,6 +374,17 @@ export interface AnalysisSnapshot {
     riskSide: Exclude<PrimaryScenario, 'NEUTRAL'>;
     setupQuality: SetupQuality;
     entryStatus?: RiskManagementPlan['currentEntryStatus'];
+    actionableEntryZoneFrom?: number;
+    actionableEntryZoneTo?: number;
+    actionableEntryZoneStatus?: ActionableEntryZone['status'];
+    actionableEntryZoneSource?: ActionableEntryZone['source'];
+    actionableEntryZoneSetupId?: string;
+    actionableEntryZoneRr?: number;
+    actionableEntryZoneTradable?: boolean;
+    actionableEntryZoneNotTradableReason?: ActionableEntryZone['notTradableReason'];
+    actionableEntryZoneExpirationReason?: SetupExpirationReason;
+    longActivationLevel?: number;
+    shortActivationLevel?: number;
     riskReward?: number;
     requiredEntryForMinRr?: number;
     marketRegime: MarketRegime;
@@ -333,6 +427,15 @@ export interface AnalysisSnapshot {
     usdtDominanceBreakoutStatus: DominanceAnalysis['breakoutStatus'];
     usdtDominanceScore: number;
     usdtDominanceImpact: DominanceAnalysis['signalImpact'];
+    tacticalStatus: TacticalStatus;
+    tacticalSide: TacticalSide;
+    tacticalZoneFrom?: number;
+    tacticalZoneTo?: number;
+    tacticalRR?: number;
+    tacticalStop?: number;
+    tacticalRequiredEntryForMinRr?: number;
+    tacticalZoneStatus?: TacticalSetup['zoneStatus'];
+    tacticalReason?: string;
     strategyVersion: string;
     createdAt: Date;
 }

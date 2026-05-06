@@ -172,7 +172,9 @@ export class TelegramService {
         const t = this.getAnalysisLabels(locale);
         const clean = (value: string) => value.replace(/_/g, ' ');
         const shorten = (value: string, max: number) => this.shortenText(value, max);
-        const entry = this.formatEntryZone(result, locale);
+        const referenceZone = this.formatEntryZone(result, locale);
+        const actionableZone = this.formatActionableEntryZone(result, locale);
+        const activationLevels = this.formatActivationLevels(result, locale);
         const takeProfits = result.riskManagement.takeProfit.length
             ? result.riskManagement.takeProfit.join(' / ')
             : 'n/a';
@@ -181,11 +183,14 @@ export class TelegramService {
               `${t.entryStatus}: <b>${escape(this.getEntryStatusText(result, locale))}</b>\n` +
               `${escape(this.buildTradePlanStatusLines(result, locale))}` +
               `${t.noActiveSetup} <b>${escape(result.entry.currentPrice)}</b>\n` +
-              `${this.getReferenceZoneLabel(result, locale)}: ${escape(entry)}\n` +
+              `${t.dynamicReferenceZone}: ${escape(referenceZone)}\n` +
+              `${locale === 'ru' ? 'Назначение' : 'Purpose'}: ${locale === 'ru' ? 'только оценка late/chase; это не ТВХ' : 'informational late/chase check only; not an entry zone'}\n` +
+              `${t.actionableEntryZone}: ${escape(actionableZone)}\n` +
+              `${activationLevels ? `${escape(activationLevels)}\n` : ''}` +
               `${escape(this.buildReferenceZoneStatus(result, locale))}` +
               `${escape(shorten(this.localizeWaitEntryComment(result, locale) || t.noEntryWhileWait, 180))}\n\n`
             : `<b>${t.entry}</b>\n` +
-              `${t.zone}: <b>${escape(entry)}</b>\n` +
+              `${t.zone}: <b>${escape(actionableZone)}</b>\n` +
               `${t.current}: <b>${escape(result.entry.currentPrice)}</b>\n\n` +
               `<b>${t.riskManagement}</b>\n` +
               `${t.stop}: <b>${escape(result.riskManagement.stopLoss || 'n/a')}</b>\n` +
@@ -250,6 +255,63 @@ export class TelegramService {
                `<b>${t.currentAction}</b>\n${escape(this.buildLocalizedAction(result, locale))}`;
     }
 
+    private formatTacticalEntryMessage(result: AnalysisResult, locale: 'ru' | 'en' = 'en'): string {
+        const escape = (value: string | number) => String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+        const tactical = result.tacticalSetup;
+        const zone = tactical.zone ? `${tactical.zone.from} - ${tactical.zone.to}` : 'n/a';
+        const stop = tactical.stop ? tactical.stop.price : 'n/a';
+        const rr = tactical.rr !== undefined ? tactical.rr.toFixed(2) : 'n/a';
+        const isConfirmed = tactical.status === 'CONFIRMED';
+        const stopLabel = isConfirmed ? '1H stop' : 'Candidate 1H stop';
+        const rrLabel = isConfirmed ? 'Tactical R/R' : 'Projected R/R';
+        const zoneStatus = tactical.zoneStatus || 'PENDING_RECALCULATION';
+        const requiredEntry = tactical.requiredEntryForMinRr
+            ? tactical.side === 'LONG'
+                ? `<= ${tactical.requiredEntryForMinRr}`
+                : `>= ${tactical.requiredEntryForMinRr}`
+            : 'n/a';
+        const waitingFor = tactical.waitingFor.slice(0, 5).map(item => `• ${escape(this.localizeTacticalText(item, locale))}`).join('\n') || (locale === 'ru' ? '• Дополнительные условия не требуются.' : '• No additional conditions.');
+        const invalidation = tactical.invalidation.slice(0, 5).map(item => `• ${escape(this.localizeTacticalText(item, locale))}`).join('\n') || (locale === 'ru' ? '• n/a' : '• n/a');
+        const reason = this.localizeTacticalText(tactical.reason, locale);
+
+        if (locale === 'ru') {
+            return `🎯 <b>Tactical Entry Watch — ${escape(result.symbol)}</b>\n\n` +
+                `Решение по 4H setup: <b>${escape(result.decision)}</b>\n` +
+                `Статус: <b>${escape(tactical.status)}</b>\n` +
+                `Side: <b>${escape(tactical.side)}</b>\n` +
+                `Причина: ${escape(reason)}\n\n` +
+                (tactical.status === 'DISABLED'
+                    ? `<i>Tactical layer выключен и не меняет основной 4H decision.</i>`
+                    : `Зона: <b>${escape(zone)}</b>\n` +
+                      `Статус зоны: <b>${escape(zoneStatus)}</b>\n` +
+                      `Required tactical entry: <b>${escape(requiredEntry)}</b>\n` +
+                      `${stopLabel}: <b>${escape(stop)}</b>\n` +
+                      `${rrLabel}: <b>${escape(rr)} / required 1.8</b>\n\n` +
+                      `<b>Ждём:</b>\n${waitingFor}\n\n` +
+                      `<b>Инвалидация:</b>\n${invalidation}\n\n` +
+                      `<i>Это tactical 1H-сценарий, а не подтверждённый 4H swing-сигнал.</i>`);
+        }
+
+        return `🎯 <b>Tactical Entry Watch — ${escape(result.symbol)}</b>\n\n` +
+            `Main 4H Setup: <b>${escape(result.decision)}</b>\n` +
+            `Status: <b>${escape(tactical.status)}</b>\n` +
+            `Side: <b>${escape(tactical.side)}</b>\n` +
+            `Reason: ${escape(reason)}\n\n` +
+            (tactical.status === 'DISABLED'
+                ? `<i>Tactical layer is disabled and does not change the main 4H decision.</i>`
+                : `Zone: <b>${escape(zone)}</b>\n` +
+                  `Zone status: <b>${escape(zoneStatus)}</b>\n` +
+                  `Required tactical entry: <b>${escape(requiredEntry)}</b>\n` +
+                  `${stopLabel}: <b>${escape(stop)}</b>\n` +
+                  `${rrLabel}: <b>${escape(rr)} / required 1.8</b>\n\n` +
+                  `<b>Waiting for:</b>\n${waitingFor}\n\n` +
+                  `<b>Invalidation:</b>\n${invalidation}\n\n` +
+                  `<i>This is a tactical 1H setup, not a confirmed 4H swing setup.</i>`);
+    }
+
     private getAnalysisLabels(locale: 'ru' | 'en') {
         if (locale === 'ru') {
             return {
@@ -266,6 +328,8 @@ export class TelegramService {
                 tradePlan: 'План сделки',
                 entryStatus: 'Статус входа',
                 noActiveSetup: 'Активной сделки нет. Текущая цена:',
+                dynamicReferenceZone: 'Dynamic Reference Zone',
+                actionableEntryZone: 'Actionable Entry Zone',
                 missedRetestZone: 'Пропущенная зона ретеста',
                 referenceZone: 'Reference-зона',
                 noEntryWhileWait: 'Нет entry/SL/TP пока decision = WAIT.',
@@ -300,6 +364,8 @@ export class TelegramService {
             tradePlan: 'Trade Plan',
             entryStatus: 'Entry Status',
             noActiveSetup: 'No active trade setup. Current price:',
+            dynamicReferenceZone: 'Dynamic Reference Zone',
+            actionableEntryZone: 'Actionable Entry Zone',
             missedRetestZone: 'Missed Retest Zone',
             referenceZone: 'Reference Zone',
             noEntryWhileWait: 'No entry/SL/TP while decision is WAIT.',
@@ -424,6 +490,63 @@ export class TelegramService {
             .replace('strong pressure on alts because BTC.D is breaking up while BTC is weak', 'сильное давление на альты: BTC.D пробивается вверх при слабом BTC');
     }
 
+    private localizeTacticalText(text: string, locale: 'ru' | 'en'): string {
+        if (locale !== 'ru') return text;
+        return text
+            .replace('Main 4H setup is already active; tactical layer is not needed.', 'Основной 4H setup уже активен; tactical layer не нужен.')
+            .replace('4H directional bias is neutral.', '4H directional bias нейтральный.')
+            .replace('4H directional bias is too weak for tactical entry.', '4H directional bias слишком слабый для tactical entry.')
+            .replace('WAIT reason is not entry timing/R/R related.', 'Причина WAIT не связана с entry timing или R/R.')
+            .replace('USDT.D shows hard risk-off conflict against tactical long.', 'USDT.D показывает жёсткий risk-off конфликт против tactical long.')
+            .replace('USDT.D shows hard risk-on conflict against tactical short.', 'USDT.D показывает жёсткий risk-on конфликт против tactical short.')
+            .replace('1H CVD is against tactical long.', '1H CVD против tactical long.')
+            .replace('1H CVD is against tactical short.', '1H CVD против tactical short.')
+            .replace('Tactical zone cannot be calculated from current 4H risk geometry.', 'Tactical zone нельзя рассчитать из текущей 4H risk-геометрии.')
+            .replace('Tactical scenario invalidated by main 4H invalidation or broken local structure.', 'Tactical-сценарий отменён main 4H invalidation или сломанной локальной структурой.')
+            .replace('4H bias allows tactical long, but price is not in the tactical zone yet.', '4H bias разрешает tactical long, но цена ещё не в tactical-зоне.')
+            .replace('4H bias allows tactical short, but price is not in the tactical zone yet.', '4H bias разрешает tactical short, но цена ещё не в tactical-зоне.')
+            .replace('4H bias allows tactical long, but current candidate zone does not provide R/R >= 1.8.', '4H bias разрешает tactical long, но текущая candidate-зона не даёт R/R >= 1.8.')
+            .replace('4H bias allows tactical short, but current candidate zone does not provide R/R >= 1.8.', '4H bias разрешает tactical short, но текущая candidate-зона не даёт R/R >= 1.8.')
+            .replace('Price is in tactical long zone, but not all 1H confirmations are present.', 'Цена в tactical long-зоне, но не все 1H-подтверждения есть.')
+            .replace('Price is in tactical short zone, but not all 1H confirmations are present.', 'Цена в tactical short-зоне, но не все 1H-подтверждения есть.')
+            .replace('Price is in tactical long zone; waiting for 1H confirmation and valid R/R.', 'Цена в tactical long-зоне; ждём 1H confirmation и валидный R/R.')
+            .replace('Price is in tactical short zone; waiting for 1H confirmation and valid R/R.', 'Цена в tactical short-зоне; ждём 1H confirmation и валидный R/R.')
+            .replace('Price returns to tactical long zone.', 'Цена возвращается в tactical long-зону.')
+            .replace('Price returns to tactical short zone.', 'Цена возвращается в tactical short-зону.')
+            .replace('Price returns to a valid tactical long zone after R/R recalculation.', 'Цена возвращается в валидную tactical long-зону после пересчёта R/R.')
+            .replace('Price returns to a valid tactical short zone after R/R recalculation.', 'Цена возвращается в валидную tactical short-зону после пересчёта R/R.')
+            .replace('Deeper pullback to a zone where R/R >= 1.8.', 'Более глубокий откат в зону, где R/R >= 1.8.')
+            .replace('Higher pullback to a zone where R/R >= 1.8.', 'Откат выше в зону, где R/R >= 1.8.')
+            .replace(/Deeper pullback to <= ([0-9.]+) where R\/R can become >= 1\.8\./g, 'Более глубокий откат к $1 или ниже, где R/R может стать >= 1.8.')
+            .replace(/Higher pullback to >= ([0-9.]+) where R\/R can become >= 1\.8\./g, 'Откат к $1 или выше, где R/R может стать >= 1.8.')
+            .replace('Recalculate 1H stop after the new reaction.', 'Пересчёт 1H stop после новой реакции.')
+            .replace('1H bullish reaction / BOS / reclaim.', '1H bullish reaction / BOS / reclaim.')
+            .replace('1H bearish reaction / BOS / retest from below.', '1H bearish reaction / BOS / retest снизу.')
+            .replace('1H bullish trigger candle.', '1H bullish trigger candle.')
+            .replace('1H bearish trigger candle.', '1H bearish trigger candle.')
+            .replace('R/R >= 1.8 using 1H local stop.', 'R/R >= 1.8 по 1H local stop.')
+            .replace('1H stop distance is not too tight versus ATR.', '1H stop не слишком близкий относительно ATR.')
+            .replace('CVD is not bearish / delta turns positive.', 'CVD не bearish / delta становится положительной.')
+            .replace('CVD is not bullish / delta turns negative.', 'CVD не bullish / delta становится отрицательной.')
+            .replace('USDT.D does not show risk-off.', 'USDT.D не показывает risk-off.')
+            .replace('USDT.D does not show risk-on against short.', 'USDT.D не показывает risk-on против short.')
+            .replace('1H loses bullish structure.', '1H теряет bullish-структуру.')
+            .replace('1H loses bearish structure.', '1H теряет bearish-структуру.')
+            .replace('CVD turns bearish.', 'CVD становится bearish.')
+            .replace('CVD turns bullish.', 'CVD становится bullish.')
+            .replace('USDT.D breaks upward / risk-off accelerates.', 'USDT.D пробивается вверх / risk-off ускоряется.')
+            .replace('USDT.D turns risk-on against short.', 'USDT.D становится risk-on против short.')
+            .replace(/Candidate 1H stop ([0-9.]+) breaks before entry confirmation\./g, 'Candidate 1H stop $1 пробит до подтверждения входа.')
+            .replace(/Tactical long invalidated if price breaks 1H stop ([0-9.]+)\./g, 'Tactical long invalidated при пробое 1H stop $1.')
+            .replace(/Tactical short invalidated if price breaks 1H stop ([0-9.]+)\./g, 'Tactical short invalidated при пробое 1H stop $1.')
+            .replace('Bullish scenario invalidates on', 'Bullish-сценарий отменяется при')
+            .replace('Bearish scenario invalidates on', 'Bearish-сценарий отменяется при')
+            .replace('4H close below', '4H close ниже')
+            .replace('4H close above', '4H close выше')
+            .replace('1H tactical stop below', '1H tactical stop ниже')
+            .replace('1H tactical stop above', '1H tactical stop выше');
+    }
+
     private buildTradePlanStatusLines(result: AnalysisResult, locale: 'ru' | 'en'): string {
         const lines: string[] = [];
         const retestStatus = result.analysis.retestStatus.toLowerCase();
@@ -482,6 +605,38 @@ export class TelegramService {
         return `${from}${separator}${to}`;
     }
 
+    private formatActionableEntryZone(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        const zone = result.actionableEntryZone;
+        if (!zone) {
+            const reason = locale === 'ru'
+                ? 'N/A - нет directional edge; ждём activation levels'
+                : 'N/A - no directional edge; wait for activation levels';
+            return reason;
+        }
+        const tradable = zone.isTradable
+            ? locale === 'ru' ? 'tradable: yes' : 'tradable: yes'
+            : locale === 'ru' ? `tradable: no${zone.notTradableReason ? ` (${zone.notTradableReason})` : ''}` : `tradable: no${zone.notTradableReason ? ` (${zone.notTradableReason})` : ''}`;
+        const rr = zone.rr !== undefined ? ` | R/R ${zone.rr}` : '';
+        const setup = `setup ${zone.setupId}`;
+        return `${setup} | ${zone.from} - ${zone.to} | ${zone.side} | ${zone.status}${rr} | ${tradable} | source ${zone.source}`;
+    }
+
+    private formatActivationLevels(result: AnalysisResult, locale: 'ru' | 'en'): string | undefined {
+        if (!result.activationLevels.long && !result.activationLevels.short) return undefined;
+        const longText = result.activationLevels.long
+            ? locale === 'ru'
+                ? `Long activation: 4H close above ${result.activationLevels.long} + retest + CVD reversal`
+                : `Long activation: 4H close above ${result.activationLevels.long} + retest + CVD reversal`
+            : undefined;
+        const shortText = result.activationLevels.short
+            ? locale === 'ru'
+                ? `Short activation: rejection/breakdown below ${result.activationLevels.short} + retest + CVD down`
+                : `Short activation: rejection/breakdown below ${result.activationLevels.short} + retest + CVD down`
+            : undefined;
+        const prefix = locale === 'ru' ? 'Watch Levels' : 'Watch Levels';
+        return `${prefix}: ${[longText, shortText].filter(Boolean).join(' | ')}`;
+    }
+
     private retestLevelInsideEntryZone(result: AnalysisResult): boolean {
         const level = result.riskManagement.retestLevel;
         if (level === undefined || result.entry.from === undefined || result.entry.to === undefined) return false;
@@ -517,18 +672,18 @@ export class TelegramService {
                 ? `Для валидного long по текущей геометрии нужен вход <= ${required}.`
                 : `Для валидного short по текущей геометрии нужен вход >= ${required}.`;
             const proximityText = result.entry.currentPrice >= zoneLow && result.entry.currentPrice <= zoneHigh + Math.abs(zoneHigh - zoneLow) * 0.35
-                ? ` Хотя цена близко к reference-зоне, вход ${result.riskSide === 'LONG' ? `выше ${required}` : `ниже ${required}`} уже не даёт требуемый R/R.`
+                ? ` Хотя цена близко к dynamic reference, вход ${result.riskSide === 'LONG' ? `выше ${required}` : `ниже ${required}`} уже не даёт требуемый R/R.`
                 : '';
-            return `Статус reference-зоны: НЕВАЛИДНА ПО ТЕКУЩЕМУ R/R. ${sideText}${proximityText}\n`;
+            return `Статус dynamic reference: INFORMATIONAL_ONLY. ${sideText}${proximityText}\n`;
         }
 
         const sideText = result.riskSide === 'LONG'
             ? `Valid long currently needs entry <= ${required}.`
             : `Valid short currently needs entry >= ${required}.`;
         const proximityText = result.entry.currentPrice >= zoneLow && result.entry.currentPrice <= zoneHigh + Math.abs(zoneHigh - zoneLow) * 0.35
-            ? ` Although price is close to the reference zone, entry ${result.riskSide === 'LONG' ? `above ${required}` : `below ${required}`} no longer provides required R/R.`
+            ? ` Although price is close to the dynamic reference, entry ${result.riskSide === 'LONG' ? `above ${required}` : `below ${required}`} no longer provides required R/R.`
             : '';
-        return `Reference zone status: INVALID BY CURRENT R/R. ${sideText}${proximityText}\n`;
+        return `Dynamic reference status: INFORMATIONAL_ONLY. ${sideText}${proximityText}\n`;
     }
 
     private buildLocalizedAction(result: AnalysisResult, locale: 'ru' | 'en'): string {
@@ -1326,7 +1481,7 @@ export class TelegramService {
             return;
         }
 
-        await this.bot.sendMessage(chatId, `🔎 Analyzing *${symbol.toUpperCase()}* on 4H...`, { parse_mode: 'Markdown' });
+        await this.bot.sendMessage(chatId, `🔎 Analyzing *${symbol.toUpperCase()}* MTF / 4H setup...`, { parse_mode: 'Markdown' });
 
         try {
             const user = await this.dbService.getUser(chatId);
@@ -1334,6 +1489,7 @@ export class TelegramService {
             const result = await this.analysisService.analyze(symbol, locale);
             await this.sendMessage(chatId, this.formatAnalysisResult(result, locale), { parse_mode: 'HTML' });
             await this.sendMessage(chatId, this.formatAnalysisSummary(result, locale), { parse_mode: 'HTML' });
+            await this.sendMessage(chatId, this.formatTacticalEntryMessage(result, locale), { parse_mode: 'HTML' });
         } catch (error: any) {
             console.error(`Failed to analyze ${symbol}:`, error);
             await this.bot.sendMessage(chatId, `Analysis failed: ${error.message || 'unknown error'}`);

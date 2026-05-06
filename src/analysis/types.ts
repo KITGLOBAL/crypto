@@ -49,7 +49,7 @@ export interface VolumeAnalysis {
     avg20: number;
     ratio: number;
     trend: 'RISING' | 'FALLING' | 'FLAT';
-    signal: 'HIGH_CONFIRMATION' | 'LOW_PARTICIPATION' | 'NORMAL';
+    signal: 'HIGH_CONFIRMATION' | 'MODERATE' | 'NORMAL' | 'LOW';
     score: number;
 }
 
@@ -130,6 +130,8 @@ export interface DominanceAnalysis {
     value: number;
     trend: 'UP' | 'DOWN' | 'RANGE' | 'UNKNOWN';
     slope: 'UP' | 'DOWN' | 'FLAT' | 'UNKNOWN';
+    change: number;
+    change4h: number;
     positionInRange: 'SUPPORT' | 'MID_RANGE' | 'RESISTANCE' | 'UNKNOWN';
     breakoutStatus: 'BREAKING_UP' | 'BREAKING_DOWN' | 'NO_BREAK' | 'UNKNOWN';
     signalImpact: 'RISK_ON' | 'RISK_OFF' | 'NEUTRAL';
@@ -202,6 +204,7 @@ export interface RiskManagementPlan {
 
 export type SetupQuality = 'GOOD' | 'ACCEPTABLE' | 'POOR' | 'CHASE';
 export type MarketRegime = 'TRENDING_UP' | 'TRENDING_DOWN' | 'RANGE' | 'COMPRESSION' | 'EXPANSION' | 'DISTRIBUTION' | 'ACCUMULATION' | 'HIGH_VOLATILITY' | 'LOW_VOLATILITY' | 'UNCLEAR';
+export type PrimaryScenario = 'LONG' | 'SHORT' | 'NEUTRAL';
 
 export interface SignalOutcome {
     status: 'OPEN' | 'TP1' | 'TP2' | 'TP3' | 'SL' | 'EXPIRED' | 'NO_TRADE';
@@ -225,6 +228,8 @@ export interface AnalysisResult {
     directionScore: number;
     setupQualityScore: number;
     riskScore: number;
+    primaryScenario: PrimaryScenario;
+    riskSide: Exclude<PrimaryScenario, 'NEUTRAL'>;
     setupQuality: SetupQuality;
     setupReason: string;
     mainReason: string;
@@ -250,6 +255,7 @@ export interface AnalysisResult {
         orderFlow: string;
         btc: string;
         btcDominance: string;
+        altMarketFilter: string;
         usdtDominance: string;
         derivatives: string;
         riskReward: string;
@@ -281,6 +287,8 @@ export interface AnalysisSnapshot {
     directionScore: number;
     setupQualityScore: number;
     riskScore: number;
+    primaryScenario: PrimaryScenario;
+    riskSide: Exclude<PrimaryScenario, 'NEUTRAL'>;
     setupQuality: SetupQuality;
     entryStatus?: RiskManagementPlan['currentEntryStatus'];
     riskReward?: number;
@@ -311,8 +319,20 @@ export interface AnalysisSnapshot {
     cvdDivergence: OrderFlowAnalysis['divergence'];
     btcDominanceValue: number;
     btcDominanceTrend: DominanceAnalysis['trend'];
+    btcDominanceSlope: DominanceAnalysis['slope'];
+    btcDominanceChange4h: number;
+    btcDominancePosition: DominanceAnalysis['positionInRange'];
+    btcDominanceBreakoutStatus: DominanceAnalysis['breakoutStatus'];
+    btcDominanceScore: number;
+    btcDominanceImpact: DominanceAnalysis['signalImpact'];
     usdtDominanceValue: number;
     usdtDominanceTrend: DominanceAnalysis['trend'];
+    usdtDominanceSlope: DominanceAnalysis['slope'];
+    usdtDominanceChange4h: number;
+    usdtDominancePosition: DominanceAnalysis['positionInRange'];
+    usdtDominanceBreakoutStatus: DominanceAnalysis['breakoutStatus'];
+    usdtDominanceScore: number;
+    usdtDominanceImpact: DominanceAnalysis['signalImpact'];
     strategyVersion: string;
     createdAt: Date;
 }

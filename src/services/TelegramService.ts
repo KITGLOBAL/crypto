@@ -172,18 +172,18 @@ export class TelegramService {
         const t = this.getAnalysisLabels(locale);
         const clean = (value: string) => value.replace(/_/g, ' ');
         const shorten = (value: string, max: number) => this.shortenText(value, max);
-        const entry = result.entry.from && result.entry.to
-            ? `${result.entry.from} - ${result.entry.to}`
-            : 'No trade zone';
+        const entry = this.formatEntryZone(result, locale);
         const takeProfits = result.riskManagement.takeProfit.length
             ? result.riskManagement.takeProfit.join(' / ')
             : 'n/a';
         const tradePlan = result.decision === 'WAIT'
             ? `<b>${t.tradePlan}</b>\n` +
               `${t.entryStatus}: <b>${escape(this.getEntryStatusText(result, locale))}</b>\n` +
+              `${escape(this.buildTradePlanStatusLines(result, locale))}` +
               `${t.noActiveSetup} <b>${escape(result.entry.currentPrice)}</b>\n` +
-              `${result.riskManagement.missedRetestEntry ? t.missedRetestZone : t.referenceZone}: ${escape(entry)}\n` +
-              `${escape(shorten(this.localizeRetestEntryComment(result, locale) || t.noEntryWhileWait, 180))}\n\n`
+              `${this.getReferenceZoneLabel(result, locale)}: ${escape(entry)}\n` +
+              `${escape(this.buildReferenceZoneStatus(result, locale))}` +
+              `${escape(shorten(this.localizeWaitEntryComment(result, locale) || t.noEntryWhileWait, 180))}\n\n`
             : `<b>${t.entry}</b>\n` +
               `${t.zone}: <b>${escape(entry)}</b>\n` +
               `${t.current}: <b>${escape(result.entry.currentPrice)}</b>\n\n` +
@@ -192,11 +192,12 @@ export class TelegramService {
               `TP: <b>${escape(takeProfits)}</b>\n` +
               `R/R: <b>${escape(result.riskManagement.riskReward || 'n/a')}</b>\n` +
               `Invalidation: <i>${escape(result.riskManagement.invalidation || result.riskManagement.reason || 'n/a')}</i>\n\n`;
-        const warnings = this.buildLocalizedWarnings(result, locale).slice(0, 3).map(item => `• ${escape(shorten(item, 170))}`).join('\n') || '• No major warnings.';
+        const warnings = this.buildLocalizedWarnings(result, locale).slice(0, 3).map(item => `• ${escape(item)}`).join('\n') || '• No major warnings.';
         const scoreBreakdown = result.categoryScores
-            .filter(item => ['HTF_CONTEXT', 'MARKET_STRUCTURE_4H', 'DERIVATIVES', 'CVD_DELTA', 'RISK_REWARD'].includes(item.category))
+            .filter(item => ['HTF_CONTEXT', 'MARKET_STRUCTURE_4H', 'BTC_DOMINANCE', 'DERIVATIVES', 'CVD_DELTA', 'RISK_REWARD'].includes(item.category))
             .map(item => `${item.category.replace(/_/g, ' ')} ${item.score > 0 ? '+' : ''}${item.score}/${item.max}`)
             .join(' | ');
+        const altMarketFilter = this.formatAltMarketFilter(result, locale);
         const nextConditions = this.buildLocalizedScenarios(result, locale).slice(0, 3).map(item => `• ${escape(shorten(item, 240))}`).join('\n') || '• No specific trigger yet.';
         const whyNotNow = this.buildLocalizedWhyNotNow(result, locale)
             .slice(0, 5)
@@ -205,37 +206,48 @@ export class TelegramService {
         const tradeConfidence = result.tradeConfidence === null
             ? t.tradeConfidenceNa
             : `${result.tradeConfidence}%`;
-        const waitExplanation = result.decision === 'WAIT'
-            ? `\n<b>${t.summary}</b>\n${escape(shorten(this.sanitizeReportText(result.aiSummary || result.mainReason), 650))}\n\n` +
-              `<b>${t.currentAction}</b>\n${escape(this.buildLocalizedAction(result, locale))}\n`
-            : '';
+        const directionalBiasLabel = this.getDirectionalBiasTitle(result, locale, t.directionalBias);
 
-        return `${decisionIcon} <b>${escape(result.symbol)} 4H Analysis</b>\n\n` +
+        return `${decisionIcon} <b>${escape(result.symbol)} MTF Analysis — 4H Setup</b>\n\n` +
                `${t.decision}: <b>${escape(result.decision)}</b>\n` +
-               `${t.directionalBias}: <b>${escape(result.bias)} ${result.directionScore}/100</b>\n` +
+               `${directionalBiasLabel}: <b>${escape(this.getBiasLabel(result, locale))} ${result.directionScore}/100</b>\n` +
                `${t.setupQuality}: <b>${escape(result.setupQuality)} ${result.setupQualityScore}/100</b>\n` +
                `${t.riskScore}: <b>${escape(result.riskScore)}/100</b>\n` +
                `${t.tradeConfidence}: <b>${escape(tradeConfidence)}</b>\n\n` +
-               `${waitExplanation}` +
+               `<b>${t.methodology}</b>\n${escape(t.methodologyText)}\n\n` +
                `${tradePlan}` +
                `<b>${t.whyNotNow}</b>\n${whyNotNow}\n\n` +
                `<b>${t.requiredEntry}</b>\n${escape(shorten(this.buildLocalizedRequiredEntry(result, locale), 260))}\n\n` +
                `<b>${t.marketState}</b>\n` +
-               `${t.regime}: ${escape(clean(result.marketRegime))}\n` +
-               `1W: ${escape(result.marketState.weeklyTrend)} | 1D: ${escape(result.marketState.dailyTrend)}\n` +
+               `${t.regime}: ${escape(this.buildRegimeText(result, locale))}\n` +
+               `${locale === 'ru' ? 'HTF-контекст' : 'HTF Context'}: 1W ${escape(result.marketState.weeklyTrend)} | 1D ${escape(result.marketState.dailyTrend)}\n` +
                `4H: ${escape(clean(result.marketState.h4Trend))} | 1H: ${escape(result.marketState.h1Trend)}\n` +
                `BTC: 1D ${escape(result.marketState.btcDailyTrend)}, 4H ${escape(result.marketState.btcH4Trend)}\n` +
+               `${altMarketFilter ? `${escape(altMarketFilter)}\n` : ''}` +
                `${t.scores}: ${escape(scoreBreakdown)}\n\n` +
                `<b>${t.context}</b>\n` +
                `${escape(this.localizeVolume(result.analysis.volume, locale))}\n` +
                `${escape(this.localizeRetestStatus(result, locale))}\n` +
-               `${escape(this.localizeTriggerCandle(result.analysis.triggerCandle, locale))}\n` +
+               `${escape(this.formatTriggerCandleContext(result, locale))}\n` +
                `${escape(result.analysis.orderFlow)}\n` +
-               `${escape(shorten(result.analysis.derivatives, 260))}\n\n` +
-               `<b>${t.oiWarning}</b>\n${escape(shorten(this.stripOiWarningPrefix(result.analysis.oiWarning), 320))}\n\n` +
+               `${escape(this.formatDerivativesContext(result.analysis.derivatives))}\n\n` +
+               `<b>${this.getOiContextLabel(result, locale)}</b>\n${escape(shorten(this.stripOiWarningPrefix(result.analysis.oiWarning), 320))}\n\n` +
                `<b>${t.warnings}</b>\n${warnings}\n\n` +
                `<b>${t.setupScenarios}</b>\n${nextConditions}\n\n` +
                `<i>Rule-based MVP. Not financial advice.</i>`;
+    }
+
+    private formatAnalysisSummary(result: AnalysisResult, locale: 'ru' | 'en' = 'en'): string {
+        const escape = (value: string | number) => String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+        const t = this.getAnalysisLabels(locale);
+        const summary = this.sanitizeReportText(result.aiSummary || result.mainReason);
+
+        return `<b>${t.summary}: ${escape(result.symbol)}</b>\n\n` +
+               `${escape(summary)}\n\n` +
+               `<b>${t.currentAction}</b>\n${escape(this.buildLocalizedAction(result, locale))}`;
     }
 
     private getAnalysisLabels(locale: 'ru' | 'en') {
@@ -244,9 +256,11 @@ export class TelegramService {
                 decision: 'Решение',
                 directionalBias: 'Технический bias',
                 setupQuality: 'Качество входа',
-                riskScore: 'Risk Score',
+                riskScore: 'Качество риска',
                 tradeConfidence: 'Уверенность сделки',
                 tradeConfidenceNa: 'N/A - нет валидной сделки при WAIT',
+                methodology: 'Методология',
+                methodologyText: 'MTF-анализ с 4H execution-сценарием. 1W/1D дают старший контекст; 4H — структуру, уровни, объём, ATR, R/R и триггеры; 1H — локальное подтверждение. BTC, BTC.D и USDT.D используются как market filters. Финальное решение формируется только по закрытой 4H-свече; live price используется для текущей цены, R/R, статуса входа и расстояния до уровней.',
                 summary: 'Кратко',
                 currentAction: 'Текущее действие',
                 tradePlan: 'План сделки',
@@ -267,7 +281,7 @@ export class TelegramService {
                 oiWarning: 'OI-предупреждение',
                 warnings: 'Предупреждения',
                 setupScenarios: 'Сценарии',
-                regime: 'Режим',
+                regime: 'Локальный режим 4H/1H',
                 scores: 'Scores'
             };
         }
@@ -279,6 +293,8 @@ export class TelegramService {
             riskScore: 'Risk Score',
             tradeConfidence: 'Trade Confidence',
             tradeConfidenceNa: 'N/A - no valid trade setup while decision is WAIT',
+            methodology: 'Methodology',
+            methodologyText: 'MTF analysis with a 4H execution scenario. 1W/1D provide higher-timeframe context; 4H drives structure, levels, volume, ATR, R/R and triggers; 1H is only local confirmation. BTC, BTC.D and USDT.D are market filters. Final decision is based only on closed 4H candles; live price is used for current price, R/R, entry status and level distance.',
             summary: 'Summary',
             currentAction: 'Current Action',
             tradePlan: 'Trade Plan',
@@ -299,7 +315,7 @@ export class TelegramService {
             oiWarning: 'OI Warning',
             warnings: 'Warnings',
             setupScenarios: 'Setup Scenarios',
-            regime: 'Regime',
+            regime: 'Local 4H/1H Regime',
             scores: 'Scores'
         };
     }
@@ -324,43 +340,306 @@ export class TelegramService {
     }
 
     private stripOiWarningPrefix(text: string): string {
-        return text.replace(/^OI Warning:\s*/i, '');
+        return text
+            .replace(/^OI Warning:\s*/i, '')
+            .replace(/^OI:\s*/i, '');
+    }
+
+    private getBiasLabel(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        const score = result.directionScore;
+        if (score > 0 && score < 50) return locale === 'ru' ? 'СЛАБО БЫЧИЙ' : 'WEAK BULLISH';
+        if (score < 0 && score > -50) return locale === 'ru' ? 'СЛАБО МЕДВЕЖИЙ' : 'WEAK BEARISH';
+        if (score >= 50 && score < 70) return locale === 'ru' ? 'УМЕРЕННО БЫЧИЙ' : 'MODERATELY BULLISH';
+        if (score <= -50 && score > -70) return locale === 'ru' ? 'УМЕРЕННО МЕДВЕЖИЙ' : 'MODERATELY BEARISH';
+        if (result.primaryScenario === 'LONG' && result.marketState.weeklyTrend === 'DOWNTREND') {
+            return locale === 'ru' ? 'ЛОКАЛЬНО BULLISH' : 'LOCALLY BULLISH';
+        }
+        if (result.primaryScenario === 'SHORT' && result.marketState.weeklyTrend === 'UPTREND') {
+            return locale === 'ru' ? 'ЛОКАЛЬНО BEARISH' : 'LOCALLY BEARISH';
+        }
+        return result.bias;
+    }
+
+    private getDirectionalBiasTitle(result: AnalysisResult, locale: 'ru' | 'en', fallback: string): string {
+        const localLongAgainstWeekly = result.primaryScenario === 'LONG' && result.marketState.weeklyTrend === 'DOWNTREND';
+        const localShortAgainstWeekly = result.primaryScenario === 'SHORT' && result.marketState.weeklyTrend === 'UPTREND';
+        if (!localLongAgainstWeekly && !localShortAgainstWeekly) return fallback;
+        return locale === 'ru' ? 'Локальный технический bias' : 'Local Technical Bias';
+    }
+
+    private getOiContextLabel(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        const isWarning = /^OI Warning:/i.test(result.analysis.oiWarning);
+        if (locale === 'ru') return isWarning ? 'OI-предупреждение' : 'OI-контекст';
+        return isWarning ? 'OI Warning' : 'OI Context';
+    }
+
+    private buildRegimeText(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        const regime = result.marketRegime.replace(/_/g, ' ');
+        const volumeRatio = this.extractVolumeRatio(result);
+        if (result.marketRegime === 'EXPANSION' && volumeRatio < 1.5) {
+            return locale === 'ru'
+                ? `${regime} по волатильности, но без объёмного breakout-confirmation`
+                : `${regime} by volatility, but without volume breakout confirmation`;
+        }
+        return regime;
+    }
+
+    private formatAltMarketFilter(result: AnalysisResult, locale: 'ru' | 'en'): string | undefined {
+        if (result.symbol === 'BTCUSDT') return undefined;
+        const btcDominanceScore = result.categoryScores.find(item => item.category === 'BTC_DOMINANCE')?.score;
+        const scoreText = btcDominanceScore !== undefined ? ` (${btcDominanceScore > 0 ? '+' : ''}${btcDominanceScore}/10)` : '';
+        if (locale !== 'ru') return `Altcoin Market Filter: ${result.analysis.altMarketFilter}${scoreText}`;
+
+        return `Altcoin Market Filter: ${this.localizeAltMarketFilter(result.analysis.altMarketFilter)}${scoreText}`;
+    }
+
+    private localizeAltMarketFilter(text: string): string {
+        const match = text.match(/^BTC\.D ([0-9.]+)%, trend ([A-Z_]+), slope ([A-Z_]+), 4h change ([+-][0-9.]+) pp, position ([A-Z_]+), breakout ([A-Z_]+): (.+)$/);
+        if (match) {
+            const [, value, trend, slope, changeRaw, position, breakout, reason] = match;
+            const change = Number(changeRaw);
+            const direction = change > 0.02
+                ? 'растёт'
+                : change < -0.02
+                    ? 'падает'
+                    : 'без явного изменения';
+            return `BTC.D ${value}%, trend ${trend}, slope ${slope}, 4h ${direction} (${changeRaw} п.п.), position ${position}, breakout ${breakout}: ${this.localizeAltMarketFilterReason(reason)}`;
+        }
+
+        return this.localizeAltMarketFilterReason(text);
+    }
+
+    private localizeAltMarketFilterReason(text: string): string {
+        return text
+            .replace('supportive alt-long regime; BTC.D falling while BTC is stable/strong', 'поддерживает alt-long: BTC.D падает, BTC стабильный/сильный')
+            .replace('bearish alt regime; BTC.D rising with weak BTC pressures alts', 'негативный режим для альтов: BTC.D растёт при слабом BTC')
+            .replace('mild pressure on alt-long because BTC may outperform', 'умеренное давление на alt-long: BTC может outperform альты')
+            .replace('BTC may outperform alts; alt-long needs stronger confirmation', 'BTC может outperform альты; alt-long требует сильнее подтверждения')
+            .replace('supportive alt regime because BTC.D breaks down while BTC is strong', 'поддерживает альты: BTC.D пробивается вниз при сильном BTC')
+            .replace('BTC.D supports alts, but weak BTC keeps market risk elevated', 'BTC.D поддерживает альты, но слабый BTC оставляет рыночный риск')
+            .replace('BTC.D falling helps alts, but BTC weakness keeps risk mixed', 'падение BTC.D помогает альтам, но слабый BTC оставляет смешанный риск')
+            .replace('mild risk-on for alts as BTC.D rejects from resistance', 'мягкий risk-on для альтов: BTC.D отклоняется от сопротивления')
+            .replace('mild pressure on alts as BTC.D bounces from support', 'умеренное давление на альты: BTC.D отскакивает от поддержки')
+            .replace('neutral alt market filter', 'нейтральный фильтр для альтов')
+            .replace('strong pressure on alts because BTC.D is breaking up while BTC is weak', 'сильное давление на альты: BTC.D пробивается вверх при слабом BTC');
+    }
+
+    private buildTradePlanStatusLines(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        const lines: string[] = [];
+        const retestStatus = result.analysis.retestStatus.toLowerCase();
+        if (retestStatus.includes('pending')) {
+            const referenceZone = this.formatEntryZone(result, locale);
+            if (locale === 'ru') {
+                lines.push(result.primaryScenario === 'LONG'
+                    ? `Pullback Retest Status: ОЖИДАЕТСЯ. Цена должна вернуться в long-зону ${referenceZone} и показать bullish reaction.`
+                    : `Pullback Retest Status: ОЖИДАЕТСЯ. Цена должна вернуться в short-зону ${referenceZone} и показать rejection.`);
+                lines.push('Breakout Retest Status: NOT AVAILABLE. Сначала нужно подтверждённое закрытие 4H за breakout-уровнем.');
+            } else {
+                lines.push(result.primaryScenario === 'LONG'
+                    ? `Pullback Retest Status: PENDING. Price must return to long zone ${referenceZone} and print bullish reaction.`
+                    : `Pullback Retest Status: PENDING. Price must return to short zone ${referenceZone} and print rejection.`);
+                lines.push('Breakout Retest Status: NOT AVAILABLE. A confirmed 4H close beyond the breakout level is required first.');
+            }
+        }
+
+        const breakoutStatus = this.buildBreakoutStatus(result, locale);
+        if (breakoutStatus) lines.push(breakoutStatus);
+        return lines.length ? `${lines.join('\n')}\n` : '';
+    }
+
+    private buildBreakoutStatus(result: AnalysisResult, locale: 'ru' | 'en'): string | undefined {
+        if (result.primaryScenario === 'NEUTRAL') return undefined;
+        const level = result.riskManagement.nearestBlockingLevel;
+        if (!level) return undefined;
+
+        const volumeRatio = this.extractVolumeRatio(result);
+        const isLong = result.primaryScenario === 'LONG';
+        const priceNotThroughLevel = isLong
+            ? result.entry.currentPrice < level
+            : result.entry.currentPrice > level;
+        const volumeNotEnough = volumeRatio > 0 && volumeRatio < 1.5;
+        if (!priceNotThroughLevel && !volumeNotEnough) return undefined;
+
+        if (locale === 'ru') {
+            const priceReason = priceNotThroughLevel
+                ? isLong ? `цена ниже сопротивления ${level}` : `цена выше поддержки ${level}`
+                : undefined;
+            const volumeReason = volumeNotEnough ? `объём ${volumeRatio.toFixed(2)}x < требуемых 1.5x` : undefined;
+            return `Breakout Status: NOT ACTIVATED. Причина: ${[priceReason, volumeReason].filter(Boolean).join(', ')}.`;
+        }
+
+        const priceReason = priceNotThroughLevel
+            ? isLong ? `price is below resistance ${level}` : `price is above support ${level}`
+            : undefined;
+        const volumeReason = volumeNotEnough ? `volume ${volumeRatio.toFixed(2)}x < required 1.5x` : undefined;
+        return `Breakout Status: NOT ACTIVATED. Reason: ${[priceReason, volumeReason].filter(Boolean).join(', ')}.`;
+    }
+
+    private formatEntryZone(result: AnalysisResult, locale: 'ru' | 'en', separator: string = locale === 'ru' ? ' - ' : ' - '): string {
+        if (result.entry.from === undefined || result.entry.to === undefined) return 'No trade zone';
+        const from = Math.min(result.entry.from, result.entry.to);
+        const to = Math.max(result.entry.from, result.entry.to);
+        return `${from}${separator}${to}`;
+    }
+
+    private retestLevelInsideEntryZone(result: AnalysisResult): boolean {
+        const level = result.riskManagement.retestLevel;
+        if (level === undefined || result.entry.from === undefined || result.entry.to === undefined) return false;
+        const from = Math.min(result.entry.from, result.entry.to);
+        const to = Math.max(result.entry.from, result.entry.to);
+        return level >= from && level <= to;
+    }
+
+    private getReferenceZoneLabel(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        if (result.riskManagement.missedRetestEntry) {
+            return locale === 'ru' ? 'Пропущенная reference-зона' : 'Missed Reference Zone';
+        }
+        if (result.riskSide === 'SHORT') {
+            return locale === 'ru' ? 'Зона потенциального short-входа' : 'Short Reference Zone';
+        }
+        if (result.riskSide === 'LONG') {
+            return locale === 'ru' ? 'Зона потенциального long-входа' : 'Long Reference Zone';
+        }
+        return locale === 'ru' ? 'Reference-зона' : 'Reference Zone';
+    }
+
+    private buildReferenceZoneStatus(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        if (!result.riskManagement.requiredEntryForMinRr || result.entry.from === undefined || result.entry.to === undefined) return '';
+        const required = result.riskManagement.requiredEntryForMinRr;
+        const zoneLow = Math.min(result.entry.from, result.entry.to);
+        const zoneHigh = Math.max(result.entry.from, result.entry.to);
+        const invalidForLong = result.riskSide === 'LONG' && required < zoneLow;
+        const invalidForShort = result.riskSide === 'SHORT' && required > zoneHigh;
+        if (!invalidForLong && !invalidForShort) return '';
+
+        if (locale === 'ru') {
+            const sideText = result.riskSide === 'LONG'
+                ? `Для валидного long по текущей геометрии нужен вход <= ${required}.`
+                : `Для валидного short по текущей геометрии нужен вход >= ${required}.`;
+            const proximityText = result.entry.currentPrice >= zoneLow && result.entry.currentPrice <= zoneHigh + Math.abs(zoneHigh - zoneLow) * 0.35
+                ? ` Хотя цена близко к reference-зоне, вход ${result.riskSide === 'LONG' ? `выше ${required}` : `ниже ${required}`} уже не даёт требуемый R/R.`
+                : '';
+            return `Статус reference-зоны: НЕВАЛИДНА ПО ТЕКУЩЕМУ R/R. ${sideText}${proximityText}\n`;
+        }
+
+        const sideText = result.riskSide === 'LONG'
+            ? `Valid long currently needs entry <= ${required}.`
+            : `Valid short currently needs entry >= ${required}.`;
+        const proximityText = result.entry.currentPrice >= zoneLow && result.entry.currentPrice <= zoneHigh + Math.abs(zoneHigh - zoneLow) * 0.35
+            ? ` Although price is close to the reference zone, entry ${result.riskSide === 'LONG' ? `above ${required}` : `below ${required}`} no longer provides required R/R.`
+            : '';
+        return `Reference zone status: INVALID BY CURRENT R/R. ${sideText}${proximityText}\n`;
     }
 
     private buildLocalizedAction(result: AnalysisResult, locale: 'ru' | 'en'): string {
-        const isLong = result.bias === 'BULLISH';
+        if (result.primaryScenario === 'NEUTRAL') {
+            if (locale === 'ru') {
+                return `Сделки нет.\n\nLong валиден только если:\n• 4H выходит из RANGE вверх и закрепляется над ключевым уровнем.\n• После пробоя есть ретест уровня как поддержки.\n• R/R после ретеста >= 1.8.\n• CVD разворачивается вверх, delta положительная.\n• BTC остаётся сильным, USDT.D не показывает risk-off.\n\nShort валиден только если:\n• Цена получает rejection от верхней границы диапазона/сопротивления или делает breakdown/retest.\n• R/R >= 1.8.\n• CVD остаётся DOWN или delta становится отрицательной.\n• Funding/top trader long bias остаются перегретыми.\n• USDT.D растёт или показывает risk-off.`;
+            }
+
+            return `No trade.\n\nLong valid only if:\n• 4H exits RANGE upward and closes above a key level.\n• Breakout is followed by support retest.\n• R/R after retest is >= 1.8.\n• CVD turns UP and delta is positive.\n• BTC remains strong and USDT.D does not show risk-off.\n\nShort valid only if:\n• Price rejects upper range/resistance or prints breakdown/retest.\n• R/R >= 1.8.\n• CVD stays DOWN or delta turns negative.\n• Funding/top-trader long bias stays overheated.\n• USDT.D rises or shows risk-off.`;
+        }
+
+        const isLong = result.primaryScenario === 'LONG';
         const breakoutLevel = result.riskManagement.nearestBlockingLevel;
         const requiredEntry = result.riskManagement.requiredEntryForMinRr;
 
         if (locale === 'ru') {
             const pullback = requiredEntry
-                ? `Long становится валидным только если цена возвращается в зону, где расчётный R/R >= 1.8. По текущей геометрии это не выше ${requiredEntry}.`
-                : 'Long становится валидным только если цена возвращается в зону, где расчётный R/R >= 1.8.';
+                ? isLong
+                    ? `Цена возвращается в зону, где расчётный R/R >= 1.8. По текущей long-геометрии это не выше ${requiredEntry}.`
+                    : `Цена возвращается в зону, где расчётный R/R >= 1.8. По текущей short-геометрии это не ниже ${requiredEntry}.`
+                : 'Цена возвращается в зону, где расчётный R/R >= 1.8.';
             const breakout = breakoutLevel
-                ? `4H закрывается выше ${breakoutLevel}, затем уровень ретестится как поддержка.`
+                ? isLong
+                    ? `4H закрывается выше ${breakoutLevel}, затем уровень ретестится как поддержка.`
+                    : `4H закрывается ниже ${breakoutLevel}, затем уровень ретестится как сопротивление.`
                 : '4H пробивает ключевой уровень, затем уровень ретестится.';
-            return `Сделки нет.\n\n${isLong ? 'Long' : 'Short'} валиден только если:\n• ${pullback}\n• Или ${breakout}\n• CVD продолжает расти, delta остаётся положительной, bearish divergence не появляется.\n• USDT.D не пробивает диапазон вверх и не показывает risk-off ускорение.`;
+            const cvdNeedsTurn = isLong && !result.analysis.orderFlow.includes('CVD UP');
+            const cvd = isLong
+                ? cvdNeedsTurn
+                    ? 'CVD должен развернуться вверх, delta стать положительной, bearish divergence не должна появиться.'
+                    : 'CVD продолжает расти, delta остаётся положительной, bearish divergence не появляется.'
+                : 'CVD остаётся DOWN или delta становится отрицательной, bullish divergence не появляется.';
+            const usdt = isLong
+                ? 'USDT.D не пробивает диапазон вверх и не показывает risk-off ускорение.'
+                : 'USDT.D растёт или подтверждает risk-off ускорение.';
+            return `Сделки нет.\n\n${isLong ? 'Long' : 'Short'} валиден только если:\n• ${pullback}\n• Или ${breakout}\n• ${cvd}\n• ${usdt}`;
         }
 
         const pullback = requiredEntry
-            ? `Pullback gives R/R >= 1.8 around ${requiredEntry}.`
+            ? isLong
+                ? `Pullback gives R/R >= 1.8 at or below ${requiredEntry}.`
+                : `Pullback gives R/R >= 1.8 at or above ${requiredEntry}.`
             : 'Pullback gives R/R >= 1.8.';
         const breakout = breakoutLevel
-            ? `4H closes above ${breakoutLevel}, then retests it as support.`
+            ? isLong
+                ? `4H closes above ${breakoutLevel}, then retests it as support.`
+                : `4H closes below ${breakoutLevel}, then retests it as resistance.`
             : '4H breaks the key level, then retests it.';
-        return `No trade.\n\nValid ${isLong ? 'Long' : 'Short'} Only If:\n• ${pullback}\n• Or ${breakout}\n• CVD keeps confirming.\n• USDT.D does not move against the scenario.`;
+        const cvdNeedsTurn = isLong && !result.analysis.orderFlow.includes('CVD UP');
+        const cvd = isLong
+            ? cvdNeedsTurn
+                ? 'CVD must turn UP, delta must become positive, and bearish divergence must not appear.'
+                : 'CVD keeps rising, delta stays positive, and bearish divergence does not appear.'
+            : 'CVD stays DOWN or delta turns negative, and bullish divergence does not appear.';
+        const usdt = isLong
+            ? 'USDT.D does not break upward or show risk-off acceleration.'
+            : 'USDT.D rises or confirms risk-off acceleration.';
+        return `No trade.\n\nValid ${isLong ? 'Long' : 'Short'} Only If:\n• ${pullback}\n• Or ${breakout}\n• ${cvd}\n• ${usdt}`;
     }
 
     private getEntryStatusText(result: AnalysisResult, locale: 'ru' | 'en'): string {
         const status = result.riskManagement.currentEntryStatus || 'NO_TRADE';
         if (locale === 'ru') {
+            if (result.primaryScenario === 'NEUTRAL') return 'НЕТ DIRECTIONAL EDGE';
             if (status === 'MISSED_RETEST') return 'ПРОПУЩЕН';
-            if (status === 'TOO_LATE') return 'ПОЗДНИЙ';
+            if (status === 'TOO_LATE' && result.riskSide === 'SHORT') return 'НИЖЕ SHORT-ЗОНЫ';
+            if (status === 'TOO_LATE' && result.riskSide === 'LONG') return 'ВЫШЕ LONG-ЗОНЫ';
             if (status === 'VALID') return 'ВАЛИДЕН';
             if (status === 'WAITING_RETEST') return 'ОЖИДАЕТ РЕТЕСТ';
             return 'НЕТ СДЕЛКИ';
         }
+        if (status === 'TOO_LATE' && result.riskSide === 'SHORT') return 'BELOW SHORT ZONE';
+        if (status === 'TOO_LATE' && result.riskSide === 'LONG') return 'ABOVE LONG ZONE';
         return status.replace(/_/g, ' ');
+    }
+
+    private localizeWaitEntryComment(result: AnalysisResult, locale: 'ru' | 'en'): string | undefined {
+        if (result.riskManagement.retestEntryComment) {
+            if (locale !== 'ru') return result.riskManagement.retestEntryComment;
+            const level = result.riskManagement.retestLevel;
+            const rr = result.riskManagement.riskReward?.toFixed(2) || 'n/a';
+            const entryZone = this.formatEntryZone(result, locale);
+            const direction = result.riskSide === 'LONG' ? 'выше' : 'ниже';
+            if (!this.retestLevelInsideEntryZone(result)) {
+                return `Локальная реакция была около ${level || 'уровня'}, после чего цена ушла ${direction} reference-зоны ${entryZone}, а R/R ухудшился до ${rr}.`;
+            }
+            return `Ретест reference-зоны был подтверждён около ${level || 'уровня'}, после чего цена ушла ${direction} зоны входа, а R/R ухудшился до ${rr}.`;
+        }
+
+        const status = result.riskManagement.currentEntryStatus;
+        const entry = result.entry.from && result.entry.to ? this.formatEntryZone(result, locale) : undefined;
+        if (status === 'TOO_LATE' && result.riskSide === 'SHORT') {
+            return locale === 'ru'
+                ? `Текущая цена ниже зоны потенциального short-входа${entry ? ` ${entry}` : ''}, поэтому вход с текущей цены хуже по R/R.`
+                : `Current price is below the potential short-entry zone${entry ? ` ${entry}` : ''}, so short entry from here has worse R/R.`;
+        }
+        if (status === 'TOO_LATE' && result.riskSide === 'LONG') {
+            return locale === 'ru'
+                ? `Текущая цена выше зоны потенциального long-входа${entry ? ` ${entry}` : ''}, поэтому вход с текущей цены хуже по R/R.`
+                : `Current price is above the potential long-entry zone${entry ? ` ${entry}` : ''}, so long entry from here has worse R/R.`;
+        }
+        return undefined;
+    }
+
+    private formatDerivativesContext(text: string): string {
+        const oiIndex = text.indexOf('. OI ');
+        const firstOiSentenceIndex = text.indexOf('. Price ');
+        const cutIndex = [oiIndex, firstOiSentenceIndex]
+            .filter(index => index >= 0)
+            .sort((a, b) => a - b)[0];
+        return cutIndex !== undefined ? text.slice(0, cutIndex).trim() + '.' : text;
     }
 
     private localizeRetestEntryComment(result: AnalysisResult, locale: 'ru' | 'en'): string | undefined {
@@ -368,7 +647,12 @@ export class TelegramService {
         if (locale !== 'ru') return result.riskManagement.retestEntryComment;
         const level = result.riskManagement.retestLevel;
         const rr = result.riskManagement.riskReward?.toFixed(2) || 'n/a';
-        return `Ретест был подтверждён около ${level || 'уровня'}, но цена ушла выше зоны ретеста, а R/R ухудшился до ${rr}.`;
+        const direction = result.riskSide === 'LONG' ? 'выше' : 'ниже';
+        const entryZone = this.formatEntryZone(result, locale);
+        if (!this.retestLevelInsideEntryZone(result)) {
+            return `Локальная реакция была около ${level || 'уровня'}, после чего цена ушла ${direction} reference-зоны ${entryZone}, а R/R ухудшился до ${rr}.`;
+        }
+        return `Ретест reference-зоны был подтверждён около ${level || 'уровня'}, после чего цена ушла ${direction === 'выше' ? 'выше зоны входа' : 'ниже зоны входа'}, а R/R ухудшился до ${rr}.`;
     }
 
     private localizeVolume(text: string, locale: 'ru' | 'en'): string {
@@ -383,7 +667,11 @@ export class TelegramService {
         if (locale !== 'ru') return result.analysis.retestStatus;
         if (result.riskManagement.missedRetestEntry) {
             const level = result.riskManagement.retestLevel || 'уровня';
-            return `Статус ретеста: подтверждён, но вход пропущен. Цена ушла выше зоны ретеста около ${level}.`;
+            const direction = result.riskSide === 'LONG' ? 'выше зоны входа' : 'ниже зоны входа';
+            if (!this.retestLevelInsideEntryZone(result)) {
+                return `Статус ретеста: не подтверждён для текущей reference-зоны. Локальная реакция подтверждена около ${level}, после чего цена ушла ${direction}.`;
+            }
+            return `Статус ретеста: подтверждён для текущей reference-зоны, но вход пропущен. Реакция была около ${level}, после чего цена ушла ${direction}.`;
         }
         return result.analysis.retestStatus.replace('Retest Status:', 'Статус ретеста:');
     }
@@ -398,35 +686,117 @@ export class TelegramService {
             .replace('volume', 'объём');
     }
 
+    private formatTriggerCandleContext(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        const trigger = result.analysis.triggerCandle.toLowerCase();
+        const volumeRatio = this.extractVolumeRatio(result);
+        if (trigger.includes('weak trigger')) {
+            return this.buildWeakTriggerWarning(result, volumeRatio, locale);
+        }
+        return this.localizeTriggerCandle(result.analysis.triggerCandle, locale);
+    }
+
     private buildLocalizedWarnings(result: AnalysisResult, locale: 'ru' | 'en'): string[] {
         if (locale !== 'ru') return result.warnings;
 
         const warnings: string[] = [];
         if (result.riskManagement.nearestBlockingLevel) {
-            warnings.push(`Ближайшее сопротивление ${result.riskManagement.nearestBlockingLevel} ограничивает потенциальный TP-path; при WAIT активный TP не выставляется.`);
+            const levelText = result.riskSide === 'LONG' ? 'Ближайшее сопротивление' : 'Ближайшая поддержка';
+            warnings.push(`${levelText} ${result.riskManagement.nearestBlockingLevel} ограничивает потенциальный TP-path; при WAIT активный TP не выставляется.`);
         }
-        if (result.setupReason.includes('premium')) {
+        if (result.primaryScenario === 'LONG' && result.setupReason.includes('premium')) {
             warnings.push('Long находится в premium-зоне, риск догонять цену повышен.');
         }
-        warnings.push('Trigger candle поддерживает направление, но для входа всё ещё нужны объём и приемлемый R/R.');
+        if (result.primaryScenario === 'SHORT' && result.setupReason.includes('discount')) {
+            warnings.push('Short находится в discount-зоне, риск догонять цену повышен.');
+        }
+        if (result.primaryScenario === 'NEUTRAL') {
+            warnings.push('Нет активной стороны сделки: long и short требуют отдельных подтверждений.');
+        } else {
+            const volumeRatio = this.extractVolumeRatio(result);
+            const closeLocationText = this.describeTriggerCloseLocation(result, locale);
+            const noBreakout = result.marketState.h4Trend === 'RANGE' || result.analysis.marketStructure.includes('BOS NONE');
+            const trigger = result.analysis.triggerCandle.toLowerCase();
+            const triggerIsStrong = trigger.includes('strong trigger');
+            const triggerIsAcceptable = trigger.includes('acceptable trigger');
+            if (trigger.includes('weak trigger')) {
+                warnings.push(this.buildWeakTriggerWarning(result, volumeRatio, locale));
+            } else if (volumeRatio >= 1.5 && noBreakout) {
+                warnings.push('Trigger candle приемлемая, объём высокий, но 4H структура остаётся в RANGE и пробой не подтверждён.');
+            } else if (volumeRatio >= 1.5) {
+                warnings.push('Trigger candle поддерживает направление, объём высокий; для входа всё ещё нужен приемлемый R/R.');
+            } else if (volumeRatio >= 1.2) {
+                warnings.push(`${triggerIsStrong ? 'Trigger candle сильная' : 'Trigger candle приемлемая'}, но объём ${volumeRatio.toFixed(2)}x не дотягивает до breakout-confirmation > 1.5x, а R/R с текущей цены остаётся слабым.`);
+            } else if (triggerIsAcceptable) {
+                warnings.push(`Trigger candle приемлемая, но не даёт сильного breakout-подтверждения: ${closeLocationText}, объём ${volumeRatio.toFixed(2)}x, breakout не подтверждён.`);
+            } else {
+                warnings.push('Trigger candle поддерживает направление, но для входа всё ещё нужны объём и приемлемый R/R.');
+            }
+        }
         return warnings;
+    }
+
+    private buildWeakTriggerWarning(result: AnalysisResult, volumeRatio: number, locale: 'ru' | 'en'): string {
+        const closeLocationText = this.describeTriggerCloseLocation(result, locale);
+        const bodyPct = this.extractTriggerBodyPct(result);
+        const hasGoodBody = bodyPct !== undefined && bodyPct >= 50;
+        const lowVolume = volumeRatio > 0 && volumeRatio < 0.8;
+
+        if (locale !== 'ru') {
+            if (hasGoodBody && lowVolume) {
+                return `Trigger candle: bullish price action, but weak volume (${volumeRatio.toFixed(2)}x). Body ${bodyPct.toFixed(1)}%, ${closeLocationText}; no breakout confirmation.`;
+            }
+            return `Trigger candle is weak: ${closeLocationText}, volume ${volumeRatio.toFixed(2)}x; no breakout confirmation.`;
+        }
+
+        if (hasGoodBody && lowVolume) {
+            return `Trigger candle: бычья по форме, слабая по объёму (${volumeRatio.toFixed(2)}x). Тело ${bodyPct.toFixed(1)}%, ${closeLocationText}; breakout-confirmation нет.`;
+        }
+        return `Trigger candle слабая: ${closeLocationText}, объём ${volumeRatio.toFixed(2)}x; breakout-confirmation нет.`;
     }
 
     private buildLocalizedScenarios(result: AnalysisResult, locale: 'ru' | 'en'): string[] {
         if (locale !== 'ru') return result.nextConditions;
 
+        if (result.primaryScenario === 'NEUTRAL') {
+            return [
+                'Long: 4H выходит из RANGE вверх и закрепляется над ключевым уровнем; затем нужен ретест как поддержки, R/R >= 1.8, CVD UP/positive delta, BTC сильный, USDT.D без risk-off.',
+                'Short: rejection от верхней границы диапазона/сопротивления или breakdown/retest; R/R >= 1.8, CVD DOWN/negative delta, long-позиционирование остаётся перегретым, USDT.D растёт/risk-off.',
+                'Сейчас нет single-side сценария: R/R может быть приемлемым, но directional/setup confirmation недостаточен.'
+            ];
+        }
+
         const level = result.riskManagement.nearestBlockingLevel;
         const required = result.riskManagement.requiredEntryForMinRr;
         const support = result.riskManagement.requiredEntryForMinRr;
         const scenarios: string[] = [];
-        if (level) {
-            scenarios.push(`Breakout LONG activation: 4H close выше ${level} + объём > 1.5x + CVD продолжает расти. Это ещё не вход.`);
-            scenarios.push(`Breakout LONG entry: ждать ретест ${level} как поддержки; вход только если R/R после ретеста >= 1.8.`);
+        const isLong = result.primaryScenario === 'LONG';
+        if (level && isLong) {
+            const cvdCondition = result.analysis.orderFlow.includes('CVD UP')
+                ? 'CVD продолжает расти'
+                : 'CVD разворачивается вверх';
+            scenarios.push(`Активация breakout LONG: закрытие 4H выше ${level} + объём > 1.5x + ${cvdCondition}. Это ещё не вход.`);
+            scenarios.push(`Вход по breakout LONG: ждать ретест ${level} как поддержки; вход только если R/R после ретеста >= 1.8.`);
+        } else if (level) {
+            scenarios.push(`Breakdown SHORT: вход только после пробоя поддержки, ретеста уровня снизу как сопротивления и нового расчёта R/R >= 1.8.`);
         }
         if (required) {
-            scenarios.push(`Pullback LONG: preferred zone около ${support}, где текущая stop/target-геометрия может дать R/R >= 1.8. Старая retest/reference zone валидна снова только при новой локальной структуре.`);
+            scenarios.push(isLong
+                ? `Pullback LONG: предпочтительная зона около ${support} или ниже, но вход только после bullish reaction на 1H/4H и сохранения R/R >= 1.8. ${this.getReferenceZoneValidityText(result, locale)}`
+                : `Pullback SHORT: предпочтительная зона около ${support} или выше, но вход только после rejection на 1H/4H и сохранения R/R >= 1.8. ${this.getReferenceZoneValidityText(result, locale)}`);
         }
         return scenarios;
+    }
+
+    private getReferenceZoneValidityText(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        const hasConfirmedRetest = result.analysis.retestStatus.toLowerCase().includes('confirmed');
+        if (locale !== 'ru') {
+            return hasConfirmedRetest
+                ? 'The missed reference zone is valid again only if new local structure forms.'
+                : 'This reference zone is only a guide and needs new local confirmation.';
+        }
+        return hasConfirmedRetest
+            ? 'Пропущенная reference-зона снова может стать рабочей только при новой локальной SL/TP-структуре и R/R >= 1.8.'
+            : 'Эта reference-зона остаётся только ориентиром и требует нового подтверждения.';
     }
 
     private buildLocalizedWhyNotNow(result: AnalysisResult, locale: 'ru' | 'en'): string[] {
@@ -434,34 +804,138 @@ export class TelegramService {
 
         const reasons: string[] = [];
         const rr = result.riskManagement.riskReward?.toFixed(2) || 'n/a';
-        reasons.push(`R/R сейчас ${rr}, минимум для сделки 1.8.`);
+        if (result.primaryScenario === 'NEUTRAL') {
+            const rrNumber = result.riskManagement.riskReward || 0;
+            reasons.push(rrNumber >= 1.8
+                ? `R/R формально достаточный (${rr}), но directional/setup confirmation недостаточен.`
+                : `R/R сейчас ${rr}, минимум для сделки 1.8.`);
+            reasons.push(`Directional edge слабый: 1W ${result.marketState.weeklyTrend}, 1D ${result.marketState.dailyTrend}, 4H ${result.marketState.h4Trend}, 1H ${result.marketState.h1Trend}.`);
+            const volumeRatio = this.extractVolumeRatio(result);
+            if (volumeRatio >= 1.5) {
+                reasons.push(`Объём высокий (${volumeRatio.toFixed(2)}x), но структура пробоя не подтверждена.`);
+            } else if (volumeRatio > 0) {
+                reasons.push(`Объём ${volumeRatio.toFixed(2)}x от среднего не даёт самостоятельного подтверждения.`);
+            }
+            if (this.hasCrowdedLongRisk(result)) {
+                reasons.push('Funding/positioning указывают на риск long-crowding, но это warning, а не самостоятельный short-сигнал.');
+            }
+            return reasons;
+        }
 
+        if ((result.riskManagement.riskReward || 0) < 1.8) {
+            reasons.push(`R/R сейчас ${rr}, минимум для сделки 1.8.`);
+        }
+
+        if (result.primaryScenario === 'LONG' && (result.marketState.weeklyTrend === 'DOWNTREND' || result.marketState.dailyTrend === 'DOWNTREND')) {
+            if (result.marketState.weeklyTrend === 'DOWNTREND' && result.marketState.dailyTrend === 'DOWNTREND') {
+                reasons.push('1W и 1D остаются в DOWNTREND, поэтому long против HTF требует более качественного входа.');
+            } else if (result.marketState.weeklyTrend === 'DOWNTREND') {
+                reasons.push('HTF-контекст смешанный: 1W DOWNTREND, но 1D уже UPTREND. Поэтому long допустим только с хорошим R/R и подтверждением.');
+            } else {
+                reasons.push('HTF-контекст смешанный: 1W не bearish, но 1D DOWNTREND. Поэтому long требует более качественного входа.');
+            }
+        }
+        if (result.primaryScenario === 'SHORT' && (result.marketState.weeklyTrend === 'UPTREND' || result.marketState.dailyTrend === 'UPTREND')) {
+            if (result.marketState.weeklyTrend === 'UPTREND' && result.marketState.dailyTrend === 'UPTREND') {
+                reasons.push('1W и 1D остаются в UPTREND, поэтому short против HTF требует более качественного входа.');
+            } else if (result.marketState.weeklyTrend === 'UPTREND') {
+                reasons.push('HTF-контекст смешанный: 1W UPTREND, но 1D уже слабее. Поэтому short допустим только с хорошим R/R и подтверждением.');
+            } else {
+                reasons.push('HTF-контекст смешанный: 1W не bullish, но 1D UPTREND. Поэтому short требует более качественного входа.');
+            }
+        }
         if (result.marketRegimeDetails.rangePosition === 'HIGH' || result.setupReason.includes('premium')) {
             reasons.push('Цена находится в premium/верхней части диапазона.');
         }
         if (result.riskManagement.nearestBlockingLevel) {
-            reasons.push(`Ближайшее сопротивление ${result.riskManagement.nearestBlockingLevel} блокирует чистый путь к TP.`);
+            const levelText = result.riskSide === 'SHORT' ? 'Ближайшая поддержка' : 'Ближайшее сопротивление';
+            reasons.push(`${levelText} ${result.riskManagement.nearestBlockingLevel} блокирует чистый путь к TP.`);
         }
         if (result.riskManagement.missedRetestEntry) {
-            reasons.push('Ретест был подтверждён, но текущий вход уже пропущен.');
+            reasons.push(this.retestLevelInsideEntryZone(result)
+                ? 'Ретест reference-зоны уже был, но текущий вход пропущен.'
+                : 'Локальная реакция уже была, но ретест текущей reference-зоны не подтверждён.');
         }
-        const volumeMatch = result.analysis.volume.match(/([0-9.]+)x average/);
-        if (volumeMatch) {
-            reasons.push(`Объём только ${volumeMatch[1]}x от среднего, нет сильного подтверждения пробоя.`);
+        const ratio = this.extractVolumeRatio(result);
+        if (ratio > 0) {
+            reasons.push(ratio >= 1.5
+                ? `Объём высокий (${ratio.toFixed(2)}x), но структура пробоя не подтверждена.`
+                : ratio >= 1.2
+                    ? `Объём ${ratio.toFixed(2)}x нормальный, но не дотягивает до breakout-confirmation > 1.5x.`
+                    : ratio >= 0.9
+                        ? `Объём ${ratio.toFixed(2)}x от среднего — нормальный, но недостаточный для breakout-confirmation > 1.5x.`
+                        : `Объём слабый (${ratio.toFixed(2)}x от среднего), нет подтверждения пробоя.`);
+        }
+        if (result.primaryScenario === 'LONG' && this.hasCrowdedLongRisk(result)) {
+            reasons.push('Funding/positioning выглядят crowded и повышают риск резкого сброса, если цена не закрепится выше сопротивления.');
         }
 
         return reasons;
+    }
+
+    private extractVolumeRatio(result: AnalysisResult): number {
+        const volumeMatch = result.analysis.volume.match(/([0-9.]+)x average/);
+        return volumeMatch ? Number(volumeMatch[1]) : 0;
+    }
+
+    private extractTriggerCloseLocation(result: AnalysisResult): number | undefined {
+        const match = result.analysis.triggerCandle.match(/close location ([0-9.]+)%/i);
+        return match ? Number(match[1]) : undefined;
+    }
+
+    private extractTriggerBodyPct(result: AnalysisResult): number | undefined {
+        const match = result.analysis.triggerCandle.match(/body ([0-9.]+)%/i);
+        return match ? Number(match[1]) : undefined;
+    }
+
+    private describeTriggerCloseLocation(result: AnalysisResult, locale: 'ru' | 'en'): string {
+        const closeLocation = this.extractTriggerCloseLocation(result);
+        if (closeLocation === undefined || Number.isNaN(closeLocation)) {
+            return locale === 'ru'
+                ? 'закрытие в диапазоне не определено'
+                : 'close location is unavailable';
+        }
+
+        if (locale !== 'ru') {
+            if (closeLocation >= 70) return `close is in the upper part of the candle range (${closeLocation.toFixed(1)}%)`;
+            if (closeLocation <= 30) return `close is in the lower part of the candle range (${closeLocation.toFixed(1)}%)`;
+            return `close is near the middle of the candle range (${closeLocation.toFixed(1)}%)`;
+        }
+
+        if (closeLocation >= 70) return `закрытие в верхней части диапазона свечи (${closeLocation.toFixed(1)}%)`;
+        if (closeLocation <= 30) return `закрытие в нижней части диапазона свечи (${closeLocation.toFixed(1)}%)`;
+        return `закрытие около середины диапазона свечи (${closeLocation.toFixed(1)}%)`;
+    }
+
+    private hasCrowdedLongRisk(result: AnalysisResult): boolean {
+        return result.analysis.derivatives.includes('overlong') ||
+            result.analysis.derivatives.includes('long-biased') ||
+            /30d rank (9\d|100)\/100/.test(result.analysis.derivatives);
     }
 
     private buildLocalizedRequiredEntry(result: AnalysisResult, locale: 'ru' | 'en'): string {
         if (locale !== 'ru') return result.analysis.requiredEntry;
         const required = result.riskManagement.requiredEntryForMinRr;
         const level = result.riskManagement.nearestBlockingLevel;
+        if (result.primaryScenario === 'NEUTRAL') {
+            if (required) {
+                const sideText = result.riskSide === 'LONG'
+                    ? `Для текущей long-геометрии вход должен быть не выше ${required}.`
+                    : `Для текущей short-геометрии вход должен быть не ниже ${required}.`;
+                return `${sideText} Но при NEUTRAL bias это не торговая рекомендация: сначала нужен directional edge и подтверждение структуры.`;
+            }
+            return 'При NEUTRAL bias сначала нужен directional edge; R/R-геометрия сама по себе не активирует сделку.';
+        }
         if (required && level) {
-            return `Для R/R >= 1.8 long-вход должен быть не выше ${required}, либо нужно пробить ${level} и сформировать новый чистый путь к TP после ретеста. Старая зона ретеста выше этого уровня невалидна по текущей R/R-геометрии без новой локальной структуры.`;
+            if (result.primaryScenario === 'LONG') {
+                return `Для R/R >= 1.8 long-вход: <= ${required}; либо breakout выше ${level} + retest. Reference-зона не сигнал: вход выше ${required} требует новой SL/TP-структуры.`;
+            }
+            return `Для R/R >= 1.8 pullback short-вход должен быть около ${required} или выше. Breakdown short — отдельный сценарий: нужен пробой поддержки, ретест снизу и новый расчёт R/R.`;
         }
         if (required) {
-            return `Для R/R >= 1.8 вход должен быть около ${required} или лучше.`;
+            return result.primaryScenario === 'LONG'
+                ? `Для R/R >= 1.8 long-вход должен быть не выше ${required}.`
+                : `Для R/R >= 1.8 short-вход должен быть не ниже ${required}.`;
         }
         return 'Нужен откат или новый пробой/ретест, чтобы R/R стал >= 1.8.';
     }
@@ -859,6 +1333,7 @@ export class TelegramService {
             const locale = user?.locale || 'ru';
             const result = await this.analysisService.analyze(symbol, locale);
             await this.sendMessage(chatId, this.formatAnalysisResult(result, locale), { parse_mode: 'HTML' });
+            await this.sendMessage(chatId, this.formatAnalysisSummary(result, locale), { parse_mode: 'HTML' });
         } catch (error: any) {
             console.error(`Failed to analyze ${symbol}:`, error);
             await this.bot.sendMessage(chatId, `Analysis failed: ${error.message || 'unknown error'}`);

@@ -88,11 +88,18 @@ export class TechnicalAnalyzers {
             : avgPrevious20 > 0 && avg20 < avgPrevious20 * 0.92
                 ? 'FALLING'
                 : 'FLAT';
-        const signal = ratio >= 1.5 ? 'HIGH_CONFIRMATION' : ratio <= 0.65 ? 'LOW_PARTICIPATION' : 'NORMAL';
+        const signal = ratio >= 1.5
+            ? 'HIGH_CONFIRMATION'
+            : ratio >= 1.2
+                ? 'MODERATE'
+                : ratio < 0.8
+                    ? 'LOW'
+                    : 'NORMAL';
 
         let score = 0;
         if (signal === 'HIGH_CONFIRMATION') score = directionalBias >= 0 ? 8 : -8;
-        if (signal === 'LOW_PARTICIPATION') score = directionalBias >= 0 ? -4 : 4;
+        if (signal === 'MODERATE') score = directionalBias >= 0 ? 2 : -2;
+        if (signal === 'LOW') score = directionalBias >= 0 ? -4 : 4;
 
         return { current, avg20, ratio, trend, signal, score };
     }
@@ -106,9 +113,11 @@ export class TechnicalAnalyzers {
         };
     }
 
-    public analyzeLevels(candles: Candle[], timeframe: '1d' | '4h'): LevelsAnalysis {
+    public analyzeLevels(candles: Candle[], timeframe: '1d' | '4h', currentPrice?: number): LevelsAnalysis {
         const swings = detectSwings(candles, 3).slice(-40);
-        const close = candles[candles.length - 1]?.close || 0;
+        const close = currentPrice && Number.isFinite(currentPrice) && currentPrice > 0
+            ? currentPrice
+            : candles[candles.length - 1]?.close || 0;
         const atr14 = atr(candles, 14);
         const clusterSize = atr14 > 0 ? atr14 * 0.35 : close * 0.005;
         const rawLevels: KeyLevel[] = swings.map(swing => {

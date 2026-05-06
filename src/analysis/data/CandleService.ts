@@ -20,6 +20,24 @@ export class CandleService {
 
     constructor(private redis: RedisService) {}
 
+    public async getCurrentPrice(symbol: string): Promise<number> {
+        const normalizedSymbol = symbol.toUpperCase();
+        const url = `${this.baseUrl}/fapi/v1/ticker/price?symbol=${normalizedSymbol}`;
+        const res = await fetch(url);
+
+        if (!res.ok) {
+            throw new Error(`Binance ticker failed: HTTP ${res.status} ${res.statusText}`);
+        }
+
+        const data = await res.json() as { price?: string };
+        const price = Number(data.price);
+        if (!Number.isFinite(price) || price <= 0) {
+            throw new Error(`Binance ticker returned invalid price for ${normalizedSymbol}`);
+        }
+
+        return price;
+    }
+
     public async getCandles(symbol: string, timeframe: Timeframe, limit: number = DEFAULT_LIMITS[timeframe]): Promise<Candle[]> {
         const normalizedSymbol = symbol.toUpperCase();
         const cacheKey = `candles:v1:${normalizedSymbol}:${timeframe}:${limit}`;
@@ -49,7 +67,7 @@ export class CandleService {
                 takerBuyBaseVolume: Number(row[9]),
                 takerBuyQuoteVolume: Number(row[10])
             }));
-        }, timeframe === '1h' ? 300 : 900);
+        }, this.getCandlesCacheTtl(timeframe));
     }
 
     public async getMultiTimeframeCandles(symbol: string): Promise<Record<Timeframe, Candle[]>> {
@@ -66,5 +84,10 @@ export class CandleService {
             '4h': h4,
             '1h': h1
         };
+    }
+
+    private getCandlesCacheTtl(timeframe: Timeframe): number {
+        if (timeframe === '1h' || timeframe === '4h') return 60;
+        return 900;
     }
 }

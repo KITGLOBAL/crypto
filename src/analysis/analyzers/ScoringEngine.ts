@@ -19,6 +19,9 @@ import {
 } from '../types';
 import { clamp, roundToTick } from '../utils/math';
 
+type TradeSide = 'LONG' | 'SHORT';
+type PrimaryScenario = TradeSide | 'NEUTRAL';
+
 export type ScoringInput = {
     symbol: string;
     currentPrice: number;
@@ -55,6 +58,8 @@ export type ScoringOutput = {
     directionScore: number;
     setupQualityScore: number;
     riskScore: number;
+    primaryScenario: PrimaryScenario;
+    riskSide: TradeSide;
     setupQuality: SetupQuality;
     setupReason: string;
     mainReason: string;
@@ -84,12 +89,7 @@ export class ScoringEngine {
 
         if (!isBtc) {
             categories.push(this.scoreBtc(input.btcDailyTrend, input.btcH4Trend));
-            categories.push({
-                category: 'BTC_DOMINANCE',
-                score: input.marketContext.btcDominance.score,
-                max: 10,
-                explanation: `${input.marketContext.btcDominance.impactDescription}.`
-            });
+            categories.push(this.scoreBtcDominanceForAlt(input));
         }
 
         categories.push({
@@ -137,12 +137,13 @@ export class ScoringEngine {
         const directionRawScore = categories.reduce((sum, item) => sum + item.score, 0);
         const uncappedDirectionScore = Math.round(clamp((directionRawScore / 75) * 100, -100, 100));
         const directionScore = this.applyDirectionCaps(uncappedDirectionScore, input);
-        const direction: 'LONG' | 'SHORT' = directionScore >= 0 ? 'LONG' : 'SHORT';
-        const risk = this.buildRiskPlan(direction, input);
+        const riskSide: TradeSide = directionScore >= 0 ? 'LONG' : 'SHORT';
+        const primaryScenario: PrimaryScenario = Math.abs(directionScore) < 20 ? 'NEUTRAL' : riskSide;
+        const risk = this.buildRiskPlan(riskSide, input);
         const riskScore = this.calculateRiskScore(risk.riskManagement.riskReward);
-        const setupQualityScore = this.calculateSetupQualityScore(direction, input, risk.riskManagement);
+        const setupQualityScore = this.calculateSetupQualityScore(riskSide, input, risk.riskManagement);
         const setupQuality = this.getSetupQuality(setupQualityScore);
-        const setupReason = this.buildSetupReason(direction, input, risk.riskManagement);
+        const setupReason = this.buildSetupReason(riskSide, input, risk.riskManagement);
         const marketRegime = input.marketRegimeAnalysis.regime;
 
         categories.push({
@@ -163,41 +164,48 @@ export class ScoringEngine {
             .filter(item => Math.abs(item.score) >= 5)
             .map(item => item.explanation);
 
-        if (input.h4Levels.premiumDiscount === 'PREMIUM' && direction === 'LONG') {
+        if (primaryScenario === 'LONG' && input.h4Levels.premiumDiscount === 'PREMIUM') {
             warnings.push('Long setup is in premium zone; chasing risk is elevated.');
         }
-        if (input.h4Levels.premiumDiscount === 'DISCOUNT' && direction === 'SHORT') {
+        if (primaryScenario === 'SHORT' && input.h4Levels.premiumDiscount === 'DISCOUNT') {
             warnings.push('Short setup is in discount zone; chasing risk is elevated.');
         }
-        if (input.marketContext.usdtDominance.score < -10 && direction === 'LONG') {
+        if (primaryScenario === 'LONG' && input.marketContext.usdtDominance.score < -10) {
             warnings.push('USDT dominance is risk-off and conflicts with long scenario.');
         }
-        if (input.marketContext.usdtDominance.score > 8 && direction === 'SHORT') {
+        if (primaryScenario === 'SHORT' && input.marketContext.usdtDominance.score > 8) {
             warnings.push('USDT dominance is risk-on and weakens short scenario.');
         }
-        if (direction === 'LONG' && input.orderFlow.divergence === 'BEARISH') {
+        const altBtcDominanceScore = isBtc ? 0 : this.scoreBtcDominanceForAlt(input).score;
+        if (!isBtc && primaryScenario === 'LONG' && altBtcDominanceScore < -4) {
+            warnings.push(`BTC dominance pressure weakens alt-long scenario: ${this.describeAltBtcDominanceImpact(input)}.`);
+        }
+        if (!isBtc && primaryScenario === 'SHORT' && altBtcDominanceScore > 4) {
+            warnings.push(`BTC dominance/risk-on context weakens alt-short scenario: ${this.describeAltBtcDominanceImpact(input)}.`);
+        }
+        if (primaryScenario === 'LONG' && input.orderFlow.divergence === 'BEARISH') {
             warnings.push('Bearish CVD divergence weakens breakout/long scenario.');
         }
-        if (direction === 'SHORT' && input.orderFlow.divergence === 'BULLISH') {
+        if (primaryScenario === 'SHORT' && input.orderFlow.divergence === 'BULLISH') {
             warnings.push('Bullish CVD divergence weakens breakdown/short scenario.');
         }
         if (input.retest.state === 'FAILED') {
             warnings.push(`Retest failed: ${input.retest.summary}`);
         }
-        if (input.triggerCandle.quality === 'REJECTION' && !((direction === 'LONG' && input.triggerCandle.direction === 'BULLISH') || (direction === 'SHORT' && input.triggerCandle.direction === 'BEARISH'))) {
+        if (primaryScenario !== 'NEUTRAL' && input.triggerCandle.quality === 'REJECTION' && !((primaryScenario === 'LONG' && input.triggerCandle.direction === 'BULLISH') || (primaryScenario === 'SHORT' && input.triggerCandle.direction === 'BEARISH'))) {
             warnings.push(`Trigger candle rejects the active direction: ${input.triggerCandle.summary}`);
-        } else if (input.triggerCandle.quality === 'REJECTION') {
+        } else if (primaryScenario !== 'NEUTRAL' && input.triggerCandle.quality === 'REJECTION') {
             warnings.push(`Trigger candle supports direction, but entry still needs volume/RR confirmation: ${input.triggerCandle.summary}`);
         }
         if (risk.riskManagement.riskReward && risk.riskManagement.riskReward < 1.0) {
             warnings.push(`Risk/reward is ${risk.riskManagement.riskReward.toFixed(2)}, far below required minimum 1.8. No trade even if direction is favorable.`);
-        } else if (risk.riskManagement.riskReward && risk.riskManagement.riskReward <= 1.9) {
+        } else if (primaryScenario !== 'NEUTRAL' && risk.riskManagement.riskReward && risk.riskManagement.riskReward <= 1.9) {
             warnings.push(`Risk/reward is ${risk.riskManagement.riskReward.toFixed(2)}, only near required minimum 1.8; entry quality is not ideal.`);
         }
 
         let decision: Decision = 'WAIT';
-        if (directionScore >= 65 && setupQualityScore >= 65 && riskScore >= 65 && direction === 'LONG') decision = 'LONG';
-        if (directionScore <= -65 && setupQualityScore >= 65 && riskScore >= 65 && direction === 'SHORT') decision = 'SHORT';
+        if (directionScore >= 65 && setupQualityScore >= 65 && riskScore >= 65 && riskSide === 'LONG') decision = 'LONG';
+        if (directionScore <= -65 && setupQualityScore >= 65 && riskScore >= 65 && riskSide === 'SHORT') decision = 'SHORT';
 
         if (riskScore < 65) {
             decision = 'WAIT';
@@ -216,10 +224,10 @@ export class ScoringEngine {
         const conflictPenalty = warnings.length >= 3 ? 15 : warnings.length >= 2 ? 10 : warnings.length === 1 ? 5 : 0;
         const confidence = Math.round(clamp(Math.min(Math.abs(directionScore), setupQualityScore, riskScore) - conflictPenalty, 0, 100));
         const tradeConfidence = decision === 'WAIT' ? null : confidence;
-        const nextConditions = this.buildNextConditions(direction, score, input, risk.riskManagement);
-        const reasonForDecision = this.buildReasonForDecision(decision, direction, directionScore, setupQuality, setupQualityScore, riskScore, risk.riskManagement.riskReward);
-        const whyNotNow = this.buildWhyNotNow(direction, input, risk.riskManagement);
-        const mainReason = this.buildMainReason(direction, input, risk.riskManagement);
+        const nextConditions = this.buildNextConditions(primaryScenario, score, input, risk.riskManagement);
+        const reasonForDecision = this.buildReasonForDecision(decision, primaryScenario, riskSide, directionScore, setupQuality, setupQualityScore, riskScore, risk.riskManagement.riskReward);
+        const whyNotNow = this.buildWhyNotNow(primaryScenario, riskSide, input, risk.riskManagement);
+        const mainReason = this.buildMainReason(primaryScenario, riskSide, input, risk.riskManagement);
         const currentAction = decision === 'WAIT'
             ? 'No trade. Wait for pullback with acceptable R/R or breakout activation followed by retest confirmation.'
             : `${decision} setup is active; use the trade plan and invalidation rules.`;
@@ -239,6 +247,8 @@ export class ScoringEngine {
             directionScore,
             setupQualityScore,
             riskScore,
+            primaryScenario,
+            riskSide,
             setupQuality,
             setupReason,
             mainReason,
@@ -294,6 +304,76 @@ export class ScoringEngine {
             max: 15,
             explanation: `BTC filter: daily ${daily.trend}, 4H ${h4.trend}.`
         };
+    }
+
+    private scoreBtcDominanceForAlt(input: ScoringInput): CategoryScore {
+        const btcD = input.marketContext.btcDominance;
+        const btcStrong = input.btcDailyTrend.trend === 'UPTREND' && input.btcH4Trend.trend !== 'DOWNTREND';
+        const btcWeak = input.btcDailyTrend.trend === 'DOWNTREND' || input.btcH4Trend.trend === 'DOWNTREND';
+        let score = 0;
+
+        if (btcD.breakoutStatus === 'BREAKING_UP') {
+            score = btcWeak ? -10 : btcStrong ? -7 : -6;
+        } else if (btcD.breakoutStatus === 'BREAKING_DOWN') {
+            score = btcStrong ? 9 : btcWeak ? 1 : 6;
+        } else if (btcD.trend === 'RANGE') {
+            if (btcD.positionInRange === 'RESISTANCE' && btcD.slope === 'DOWN') score = 5;
+            else if (btcD.positionInRange === 'SUPPORT' && btcD.slope === 'UP') score = -5;
+            else if (btcD.slope === 'UP') score = -3;
+            else if (btcD.slope === 'DOWN') score = 3;
+        } else if (btcD.trend === 'UP' || btcD.slope === 'UP') {
+            score = btcWeak ? -9 : btcStrong ? -5 : -4;
+        } else if (btcD.trend === 'DOWN' || btcD.slope === 'DOWN') {
+            score = btcStrong ? 8 : btcWeak ? 1 : 5;
+        }
+
+        return {
+            category: 'BTC_DOMINANCE',
+            score: clamp(score, -10, 10),
+            max: 10,
+            explanation: this.describeAltBtcDominanceImpact(input)
+        };
+    }
+
+    private describeAltBtcDominanceImpact(input: ScoringInput): string {
+        const btcD = input.marketContext.btcDominance;
+        const btcStrong = input.btcDailyTrend.trend === 'UPTREND' && input.btcH4Trend.trend !== 'DOWNTREND';
+        const btcWeak = input.btcDailyTrend.trend === 'DOWNTREND' || input.btcH4Trend.trend === 'DOWNTREND';
+        const state = `BTC.D ${btcD.value.toFixed(2)}%, trend ${btcD.trend}, slope ${btcD.slope}, 4h change ${this.formatPp(btcD.change4h)}, position ${btcD.positionInRange}, breakout ${btcD.breakoutStatus}`;
+
+        if (btcD.breakoutStatus === 'BREAKING_UP') {
+            return btcWeak
+                ? `${state}: strong pressure on alts because BTC.D is breaking up while BTC is weak`
+                : `${state}: BTC may outperform alts; alt-long needs stronger confirmation`;
+        }
+        if (btcD.breakoutStatus === 'BREAKING_DOWN') {
+            return btcStrong
+                ? `${state}: supportive alt regime because BTC.D breaks down while BTC is strong`
+                : `${state}: BTC.D supports alts, but weak BTC keeps market risk elevated`;
+        }
+        if (btcD.trend === 'RANGE') {
+            if (btcD.positionInRange === 'RESISTANCE' && btcD.slope === 'DOWN') {
+                return `${state}: mild risk-on for alts as BTC.D rejects from resistance`;
+            }
+            if (btcD.positionInRange === 'SUPPORT' && btcD.slope === 'UP') {
+                return `${state}: mild pressure on alts as BTC.D bounces from support`;
+            }
+        }
+        if (btcD.trend === 'UP' || btcD.slope === 'UP') {
+            return btcWeak
+                ? `${state}: bearish alt regime; BTC.D rising with weak BTC pressures alts`
+                : `${state}: mild pressure on alt-long because BTC may outperform`;
+        }
+        if (btcD.trend === 'DOWN' || btcD.slope === 'DOWN') {
+            return btcStrong
+                ? `${state}: supportive alt-long regime; BTC.D falling while BTC is stable/strong`
+                : `${state}: BTC.D falling helps alts, but BTC weakness keeps risk mixed`;
+        }
+        return `${state}: neutral alt market filter`;
+    }
+
+    private formatPp(value: number): string {
+        return `${value >= 0 ? '+' : ''}${value.toFixed(2)} pp`;
     }
 
     private scoreVolatility(h4Trend: TrendAnalysis, atr: AtrAnalysis): CategoryScore {
@@ -382,7 +462,7 @@ export class ScoringEngine {
         if (atrExtension >= 1.5) reasons.push(`extended ${atrExtension.toFixed(2)} ATR from SMA20`);
         if (atrExtension < 0.8) reasons.push(`not extended from SMA20 (${atrExtension.toFixed(2)} ATR)`);
         if (risk.tpBlockedByLevel && risk.nearestBlockingLevel) reasons.push(`nearest ${direction === 'LONG' ? 'resistance' : 'support'} at ${risk.nearestBlockingLevel} blocks TP1 path`);
-        if (risk.missedRetestEntry) reasons.push('confirmed retest entry is already missed');
+        if (risk.missedRetestEntry) reasons.push('entry is already missed after local reaction');
         if (input.triggerCandle.quality === 'WEAK') reasons.push('trigger candle is weak');
         if (rr) reasons.push(`R/R is ${rr.toFixed(2)} versus required 1.8`);
 
@@ -392,7 +472,8 @@ export class ScoringEngine {
 
     private buildReasonForDecision(
         decision: Decision,
-        direction: 'LONG' | 'SHORT',
+        primaryScenario: PrimaryScenario,
+        riskSide: TradeSide,
         directionScore: number,
         setupQuality: SetupQuality,
         setupQualityScore: number,
@@ -403,7 +484,13 @@ export class ScoringEngine {
             return `${decision} because direction score is ${directionScore}/100, setup quality is ${setupQuality} ${setupQualityScore}/100, and risk score is ${riskScore}/100.`;
         }
 
-        const biasText = direction === 'LONG' ? 'bullish' : 'bearish';
+        if (primaryScenario === 'NEUTRAL') {
+            return riskReward && riskReward >= 1.8
+                ? `WAIT because R/R is acceptable (${riskReward.toFixed(2)}), but there is no directional edge: direction score is ${directionScore}/100 and setup confirmation is incomplete.`
+                : `WAIT because there is no directional edge: direction score is ${directionScore}/100 and trade confirmation is incomplete.`;
+        }
+
+        const biasText = riskSide === 'LONG' ? 'bullish' : 'bearish';
         if (!riskReward || riskReward < 1.8) {
             return `Directional bias is ${biasText} (${directionScore}/100), but trade setup is invalid: R/R is ${riskReward?.toFixed(2) || 'n/a'} below required 1.8 and setup quality is ${setupQuality} ${setupQualityScore}/100.`;
         }
@@ -413,7 +500,7 @@ export class ScoringEngine {
         return `WAIT because directional score ${directionScore}/100 is below the required threshold.`;
     }
 
-    private buildRiskPlan(direction: 'LONG' | 'SHORT', input: ScoringInput): { entry: EntryPlan; riskManagement: RiskManagementPlan; warnings: string[] } {
+    private buildRiskPlan(direction: TradeSide, input: ScoringInput): { entry: EntryPlan; riskManagement: RiskManagementPlan; warnings: string[] } {
         const atr = input.h4Atr.atr14;
         const current = input.currentPrice;
         const warnings: string[] = [];
@@ -479,7 +566,7 @@ export class ScoringEngine {
                     missedRetestEntry,
                     currentEntryStatus: missedRetestEntry ? 'MISSED_RETEST' : current > entryTo ? 'TOO_LATE' : 'VALID',
                     retestLevel: input.retest.level,
-                    retestEntryComment: missedRetestEntry ? `Retest was confirmed near ${input.retest.level}, but current price moved above the retest/reference zone.` : undefined,
+                    retestEntryComment: missedRetestEntry ? `Local retest/reaction was near ${input.retest.level}, but current price moved above the entry zone.` : undefined,
                     requiredEntryForMinRr: roundToTick(requiredEntryForMinRr),
                     requiredEntryComment: `For R/R >= 1.8 with current stop/target geometry, long entry needs to be at or below ${roundToTick(requiredEntryForMinRr)} or resistance must break and create a new clean TP path.`,
                     scenarioInvalidation: `Bullish scenario invalidates on 4H close below ${stopLoss}.`,
@@ -542,7 +629,7 @@ export class ScoringEngine {
                 missedRetestEntry,
                 currentEntryStatus: missedRetestEntry ? 'MISSED_RETEST' : current < entryFrom ? 'TOO_LATE' : 'VALID',
                 retestLevel: input.retest.level,
-                retestEntryComment: missedRetestEntry ? `Retest was confirmed near ${input.retest.level}, but current price moved below the retest/reference zone.` : undefined,
+                retestEntryComment: missedRetestEntry ? `Local retest/reaction was near ${input.retest.level}, but current price moved below the entry zone.` : undefined,
                 requiredEntryForMinRr: roundToTick(requiredEntryForMinRr),
                 requiredEntryComment: `For R/R >= 1.8 with current stop/target geometry, short entry needs to be at or above ${roundToTick(requiredEntryForMinRr)} or support must break and create a new clean TP path.`,
                 scenarioInvalidation: `Bearish scenario invalidates on 4H close above ${stopLoss}.`,
@@ -553,11 +640,22 @@ export class ScoringEngine {
         };
     }
 
-    private buildNextConditions(direction: 'LONG' | 'SHORT', score: number, input: ScoringInput, risk: RiskManagementPlan): string[] {
+    private buildNextConditions(primaryScenario: PrimaryScenario, score: number, input: ScoringInput, risk: RiskManagementPlan): string[] {
         const conditions: string[] = [];
         const volumeTrigger = '4H volume > 1.5x average';
 
-        if (direction === 'LONG') {
+        if (primaryScenario === 'NEUTRAL') {
+            const resistance = input.h4Levels.nearestResistance?.price || 'upper range/key resistance';
+            const support = input.h4Levels.nearestSupport?.price || 'lower range/key support';
+            conditions.push(`LONG conditions: 4H exits RANGE upward and closes above ${resistance}, then retests it as support; R/R after retest >= 1.8; CVD turns UP with positive delta; funding/long crowding do not get more extreme; BTC stays strong and USDT.D does not turn risk-off.`);
+            conditions.push(`SHORT conditions: rejection from ${resistance} or 4H breakdown below ${support} followed by retest as resistance; R/R >= 1.8; CVD stays DOWN or delta turns negative; elevated funding/top-trader long bias remains a risk; USDT.D rises or confirms risk-off.`);
+            if (risk.riskReward && risk.riskReward >= 1.8) {
+                conditions.push(`Current R/R is acceptable, but directional/setup confirmation is missing, so no single-side scenario is active.`);
+            }
+            return conditions;
+        }
+
+        if (primaryScenario === 'LONG') {
             const resistance = input.h4Levels.nearestResistance?.price;
             const support = input.h4Levels.nearestSupport?.price;
             const referenceZone = risk && risk.riskReward ? `${input.currentPrice}` : 'current area';
@@ -567,7 +665,7 @@ export class ScoringEngine {
             }
             if (support) {
                 conditions.push(risk.requiredEntryForMinRr
-                    ? `Pullback LONG: preferred zone near ${support}-${risk.requiredEntryForMinRr}, where current stop/target geometry can provide R/R >= 1.8. Old retest/reference zone is valid again only if new local stop/target structure forms.`
+                    ? `Pullback LONG: preferred zone near ${support}-${risk.requiredEntryForMinRr}, where current stop/target geometry can provide R/R >= 1.8. Reference zone is only a guide and needs new local stop/target structure.`
                     : `Pullback LONG: better setup near ${input.h4Levels.nearestSupport ? support : referenceZone}, with bullish 1H/4H reaction and R/R >= 1.8.`);
             }
             if (risk.requiredEntryComment) conditions.push(risk.requiredEntryComment);
@@ -583,7 +681,7 @@ export class ScoringEngine {
         }
         if (resistance) {
             conditions.push(risk.requiredEntryForMinRr
-                ? `Pullback SHORT: preferred zone near ${risk.requiredEntryForMinRr}-${resistance}, where current stop/target geometry can provide R/R >= 1.8. Old retest/reference zone is valid again only if new local stop/target structure forms.`
+                ? `Pullback SHORT: preferred zone near ${risk.requiredEntryForMinRr}-${resistance}, where current stop/target geometry can provide R/R >= 1.8. Reference zone is only a guide and needs new local stop/target structure.`
                 : `Pullback SHORT: better setup near ${input.h4Levels.nearestResistance ? resistance : referenceZone}, with bearish 1H/4H reaction and R/R >= 1.8.`);
         }
         if (risk.requiredEntryComment) conditions.push(risk.requiredEntryComment);
@@ -612,26 +710,51 @@ export class ScoringEngine {
         return capped;
     }
 
-    private buildWhyNotNow(direction: 'LONG' | 'SHORT', input: ScoringInput, risk: RiskManagementPlan): string[] {
+    private buildWhyNotNow(primaryScenario: PrimaryScenario, riskSide: TradeSide, input: ScoringInput, risk: RiskManagementPlan): string[] {
         const reasons: string[] = [];
         const rr = risk.riskReward || 0;
+        if (primaryScenario === 'NEUTRAL') {
+            reasons.push(rr >= 1.8
+                ? `R/R is acceptable at ${rr.toFixed(2)}, but directional/setup confirmation is missing.`
+                : `R/R is ${rr.toFixed(2)}, required minimum is 1.8.`);
+            reasons.push(`Directional edge is weak (${input.weeklyTrend.trend} 1W, ${input.dailyTrend.trend} 1D, 4H ${input.h4Structure.structure}, 1H ${input.h1Trend.trend}).`);
+            if (input.volume.ratio >= 1.5) {
+                reasons.push(`Volume is high at ${input.volume.ratio.toFixed(2)}x average, but breakout structure is not confirmed.`);
+            } else if (input.volume.ratio < 1.2) {
+                reasons.push(`Volume is only ${input.volume.ratio.toFixed(2)}x average, no breakout volume confirmation.`);
+            }
+            if (input.derivatives.fundingPercentile30d >= 90 || input.derivatives.longShortRatio >= 1.5) {
+                reasons.push('Funding/positioning show elevated long-crowding risk, but this is a warning, not a standalone short signal.');
+            }
+            if (input.orderFlow.cvdTrend === 'DOWN') reasons.push('CVD is DOWN, so buyers are not clearly in control.');
+            return reasons;
+        }
+
         if (rr < 1.8) reasons.push(`R/R is ${rr.toFixed(2)}, required minimum is 1.8.`);
-        if (direction === 'LONG' && input.h4Levels.premiumDiscount === 'PREMIUM') reasons.push('Price is in premium zone.');
-        if (direction === 'SHORT' && input.h4Levels.premiumDiscount === 'DISCOUNT') reasons.push('Price is in discount zone.');
+        if (primaryScenario === 'LONG' && input.h4Levels.premiumDiscount === 'PREMIUM') reasons.push('Price is in premium zone.');
+        if (primaryScenario === 'SHORT' && input.h4Levels.premiumDiscount === 'DISCOUNT') reasons.push('Price is in discount zone.');
         const atrExtension = Math.abs(input.h4Trend.distanceFromSma20Atr);
-        if (atrExtension >= 1.5) reasons.push(`Price is extended ${atrExtension.toFixed(2)} ATR from SMA20.`);
-        if (risk.nearestBlockingLevel) reasons.push(`Nearest ${direction === 'LONG' ? 'resistance' : 'support'} ${risk.nearestBlockingLevel} blocks clean TP path.`);
-        if (input.volume.ratio < 1.2) reasons.push(`Volume is only ${input.volume.ratio.toFixed(2)}x average, no breakout volume confirmation.`);
-        if (risk.missedRetestEntry) reasons.push('Retest was confirmed, but the current entry is already missed.');
+        if (atrExtension >= 1.5) reasons.push(`Price deviated from the 20-period SMA on 4H by ${atrExtension.toFixed(2)} ATR.`);
+        if (risk.nearestBlockingLevel) reasons.push(`Nearest ${riskSide === 'LONG' ? 'resistance' : 'support'} ${risk.nearestBlockingLevel} blocks clean TP path.`);
+        if (input.volume.ratio < 1.2) {
+            reasons.push(`Volume is only ${input.volume.ratio.toFixed(2)}x average, no breakout volume confirmation.`);
+        } else if (input.volume.ratio >= 1.5 && input.h4Structure.bos === 'NONE') {
+            reasons.push(`Volume is high at ${input.volume.ratio.toFixed(2)}x average, but breakout structure is not confirmed.`);
+        }
+        if (risk.missedRetestEntry) reasons.push('Local retest/reaction happened, but the current entry is already missed.');
         return reasons;
     }
 
-    private buildMainReason(direction: 'LONG' | 'SHORT', input: ScoringInput, risk: RiskManagementPlan): string {
-        const side = direction === 'LONG' ? 'long' : 'short';
-        if (risk.missedRetestEntry) {
-            return `${direction === 'LONG' ? 'Bullish' : 'Bearish'} direction is valid, but current ${side} entry is late. Retest was confirmed, then price moved away from the retest zone; current R/R is ${risk.riskReward?.toFixed(2) || 'n/a'} vs required 1.8.`;
+    private buildMainReason(primaryScenario: PrimaryScenario, riskSide: TradeSide, input: ScoringInput, risk: RiskManagementPlan): string {
+        if (primaryScenario === 'NEUTRAL') {
+            return `No directional edge: 1W ${input.weeklyTrend.trend}, 1D ${input.dailyTrend.trend}, 4H ${input.h4Structure.structure}, 1H ${input.h1Trend.trend}. R/R may be acceptable, but neither long nor short has enough confirmation.`;
         }
-        return `${direction === 'LONG' ? 'Bullish' : 'Bearish'} direction is valid only as bias; current ${side} setup needs acceptable R/R and confirmation before entry.`;
+
+        const side = riskSide === 'LONG' ? 'long' : 'short';
+        if (risk.missedRetestEntry) {
+            return `${riskSide === 'LONG' ? 'Bullish' : 'Bearish'} direction is valid, but current ${side} entry is late. Local retest/reaction happened, then price moved away from the entry zone; current R/R is ${risk.riskReward?.toFixed(2) || 'n/a'} vs required 1.8.`;
+        }
+        return `${riskSide === 'LONG' ? 'Bullish' : 'Bearish'} direction is valid only as bias; current ${side} setup needs acceptable R/R and confirmation before entry.`;
     }
 
     private calculateRequiredLongEntry(target: number, stop: number, requiredRr: number): number {

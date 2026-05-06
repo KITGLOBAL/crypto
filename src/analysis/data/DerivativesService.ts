@@ -67,14 +67,20 @@ export class DerivativesService {
         } else if (Math.abs(fundingRate) <= 0.0002) {
             score += 3;
         }
-        if (fundingZScore30d >= 2 || fundingPercentile30d >= 95) {
-            fundingInterpretation += `; 30d funding extreme high (p${fundingPercentile30d.toFixed(0)}, z ${fundingZScore30d.toFixed(2)})`;
+        if (fundingZScore30d >= 2 && fundingPercentile30d >= 95) {
+            fundingInterpretation += `; 30d funding extreme high (rank ${fundingPercentile30d.toFixed(0)}/100, z ${fundingZScore30d.toFixed(2)})`;
             score -= 5;
-        } else if (fundingZScore30d <= -2 || fundingPercentile30d <= 5) {
-            fundingInterpretation += `; 30d funding extreme low (p${fundingPercentile30d.toFixed(0)}, z ${fundingZScore30d.toFixed(2)})`;
+        } else if (fundingPercentile30d >= 95) {
+            fundingInterpretation += `; 30d funding local high rank ${fundingPercentile30d.toFixed(0)}/100, but z ${fundingZScore30d.toFixed(2)} is not extreme`;
+            score -= 2;
+        } else if (fundingZScore30d <= -2 && fundingPercentile30d <= 5) {
+            fundingInterpretation += `; 30d funding extreme low (rank ${fundingPercentile30d.toFixed(0)}/100, z ${fundingZScore30d.toFixed(2)})`;
             score += 5;
+        } else if (fundingPercentile30d <= 5) {
+            fundingInterpretation += `; 30d funding local low rank ${fundingPercentile30d.toFixed(0)}/100, but z ${fundingZScore30d.toFixed(2)} is not extreme`;
+            score += 3;
         } else {
-            fundingInterpretation += `; 30d percentile ${fundingPercentile30d.toFixed(0)}, z ${fundingZScore30d.toFixed(2)}`;
+            fundingInterpretation += `; 30d rank ${fundingPercentile30d.toFixed(0)}/100, z ${fundingZScore30d.toFixed(2)}`;
         }
 
         let positioningInterpretation = 'Top trader positioning neutral';
@@ -94,15 +100,21 @@ export class DerivativesService {
 
         let oiInterpretation = 'OI context neutral';
         if (priceOiDivergence === 'LEVERAGE_BUILDUP') {
-            oiInterpretation = `OI rising while price is flat/weak (4h ${oiChange4h.toFixed(2)}%, 24h ${oiChange24h.toFixed(2)}%): leverage buildup, squeeze risk increases`;
+            oiInterpretation = oiChange4h < 0
+                ? `OI mixed: 4H OI fell ${Math.abs(oiChange4h).toFixed(2)}%, but 24H OI rose ${oiChange24h.toFixed(2)}%. Leverage buildup exists on the wider window, but short-term OI is cooling.`
+                : `OI rising while price is flat/weak (4h ${oiChange4h.toFixed(2)}%, 24h ${oiChange24h.toFixed(2)}%): leverage buildup, squeeze risk increases`;
             score -= 2;
         } else if (priceOiDivergence === 'DELEVERAGING') {
             oiInterpretation = `OI falling while price moves (4h ${oiChange4h.toFixed(2)}%, 24h ${oiChange24h.toFixed(2)}%): deleveraging/position closing`;
-        } else if (priceChange4h > 0.6 && fundingRate <= 0.0005 && longShortRatio < 2.5) {
-            oiInterpretation = `Price rising without extreme funding/long crowding; OI 4h ${oiChange4h.toFixed(2)}%, 24h ${oiChange24h.toFixed(2)}%, 7d ${oiChange7d.toFixed(2)}%`;
+        } else if (priceChange4h > 0.6 && fundingPercentile30d < 90 && longShortRatio < 1.5) {
+            if (oiChange7d >= 15 && fundingRate < 0 && longShortRatio <= 0.7) {
+                oiInterpretation = `OI rose notably over 7d (${oiChange7d.toFixed(2)}%) while funding is negative and top traders are short-biased. This does not confirm long crowding, but increases squeeze-scenario probability if resistance breaks. OI 4h ${oiChange4h.toFixed(2)}%, 24h ${oiChange24h.toFixed(2)}%, 7d ${oiChange7d.toFixed(2)}%`;
+            } else {
+                oiInterpretation = `Price rising without extreme funding/long crowding; OI 4h ${oiChange4h.toFixed(2)}%, 24h ${oiChange24h.toFixed(2)}%, 7d ${oiChange7d.toFixed(2)}%`;
+            }
             score += 5;
-        } else if (priceChange4h > 0.6 && (fundingRate > 0.0005 || longShortRatio >= 2.5)) {
-            oiInterpretation = `Price rising while leverage looks crowded; OI 4h ${oiChange4h.toFixed(2)}%, 24h ${oiChange24h.toFixed(2)}%, 7d ${oiChange7d.toFixed(2)}%`;
+        } else if (priceChange4h > 0.6 && (fundingPercentile30d >= 90 || fundingRate > 0.0005 || longShortRatio >= 1.5)) {
+            oiInterpretation = `Price rising while funding/positioning looks crowded (funding 30d rank ${fundingPercentile30d.toFixed(0)}/100, top trader L/S ${longShortRatio.toFixed(2)}); OI 4h ${oiChange4h.toFixed(2)}%, 24h ${oiChange24h.toFixed(2)}%, 7d ${oiChange7d.toFixed(2)}%`;
             score -= 7;
         } else if (priceChange4h < -0.6 && fundingRate >= -0.0003 && longShortRatio > 0.7) {
             oiInterpretation = `Price falling without clear short overcrowding; OI 4h ${oiChange4h.toFixed(2)}%, 24h ${oiChange24h.toFixed(2)}%, 7d ${oiChange7d.toFixed(2)}%`;

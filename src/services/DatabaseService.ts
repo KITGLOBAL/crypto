@@ -1,7 +1,7 @@
 // src/services/DatabaseService.ts
 
 import { MongoClient, Db, WithId, MongoServerError, ObjectId } from 'mongodb';
-import type { ActionableEntryZone, AnalysisSnapshot, SetupExpirationReason, SignalOutcome } from '../analysis/types';
+import type { ActionableEntryZone, AnalysisSnapshot, SetupExpirationReason, SignalOutcome, TacticalSetup } from '../analysis/types';
 
 export interface LiquidationData {
     symbol: string;
@@ -92,6 +92,57 @@ export interface ActionableSetupRecord {
     expiresAt: Date;
 }
 
+export type ActionableSetupEventReason =
+    | SetupExpirationReason
+    | ActionableEntryZone['notTradableReason']
+    | 'SETUP_CREATED'
+    | 'STATUS_CHANGED'
+    | 'SETUP_REPLACED';
+
+export interface ActionableSetupEvent {
+    setupId: string;
+    symbol: string;
+    timeframe: '4h';
+    side: ActionableEntryZone['side'];
+    status: ActionableEntryZone['status'];
+    previousStatus?: ActionableEntryZone['status'];
+    from: number;
+    to: number;
+    currentPrice: number;
+    requiredEntryForMinRr?: number;
+    riskReward?: number;
+    tradable: boolean;
+    reason?: ActionableSetupEventReason;
+    source: ActionableEntryZone['source'];
+    createdAt: Date;
+}
+
+export interface TacticalSetupEvent {
+    symbol: string;
+    timeframe: '1h';
+    status: TacticalSetup['status'];
+    previousStatus?: TacticalSetup['status'];
+    side: TacticalSetup['side'];
+    zoneFrom?: number;
+    zoneTo?: number;
+    zoneStatus?: TacticalSetup['zoneStatus'];
+    rr?: number;
+    stop?: number;
+    requiredEntryForMinRr?: number;
+    reason?: string;
+    createdAt: Date;
+}
+
+export interface DashboardAlertSettings {
+    id: 'global';
+    mainDecisionChanges: boolean;
+    actionableInZone: boolean;
+    tacticalConfirmed: boolean;
+    marketFilterConflict: boolean;
+    minRiskReward: number;
+    updatedAt: Date;
+}
+
 export class DatabaseService {
     private client: MongoClient;
     private dbName: string;
@@ -103,6 +154,9 @@ export class DatabaseService {
     private readonly analysisSignalsCollectionName = 'analysis_signals';
     private readonly analysisSnapshotsCollectionName = 'analysis_snapshots';
     private readonly actionableSetupsCollectionName = 'actionable_setups';
+    private readonly actionableSetupEventsCollectionName = 'actionable_setup_events';
+    private readonly tacticalSetupEventsCollectionName = 'tactical_setup_events';
+    private readonly dashboardAlertSettingsCollectionName = 'dashboard_alert_settings';
 
     constructor(uri: string, dbName: string) {
         this.client = new MongoClient(uri);
@@ -122,6 +176,9 @@ export class DatabaseService {
             const analysisSignalsCollection = this.db.collection(this.analysisSignalsCollectionName);
             const analysisSnapshotsCollection = this.db.collection(this.analysisSnapshotsCollectionName);
             const actionableSetupsCollection = this.db.collection(this.actionableSetupsCollectionName);
+            const actionableSetupEventsCollection = this.db.collection(this.actionableSetupEventsCollectionName);
+            const tacticalSetupEventsCollection = this.db.collection(this.tacticalSetupEventsCollectionName);
+            const dashboardAlertSettingsCollection = this.db.collection(this.dashboardAlertSettingsCollectionName);
             await usersCollection.createIndex({ chatId: 1 }, { unique: true });
             await usersCollection.createIndex({ notificationsEnabled: 1, trackedSymbols: 1 });
             await liquidationsCollection.createIndex({ symbol: 1, time: -1 });
@@ -133,6 +190,11 @@ export class DatabaseService {
             await actionableSetupsCollection.createIndex({ setupId: 1 }, { unique: true });
             await actionableSetupsCollection.createIndex({ symbol: 1, timeframe: 1, status: 1, updatedAt: -1 });
             await actionableSetupsCollection.createIndex({ expiresAt: 1 });
+            await actionableSetupEventsCollection.createIndex({ setupId: 1, createdAt: -1 });
+            await actionableSetupEventsCollection.createIndex({ symbol: 1, createdAt: -1 });
+            await tacticalSetupEventsCollection.createIndex({ symbol: 1, createdAt: -1 });
+            await tacticalSetupEventsCollection.createIndex({ status: 1, createdAt: -1 });
+            await dashboardAlertSettingsCollection.createIndex({ id: 1 }, { unique: true });
 
             console.log('✅ Database indexes are in place.');
 
@@ -453,6 +515,56 @@ export class DatabaseService {
         return collection.find({ symbol }).sort({ createdAt: -1 }).limit(limit).toArray();
     }
 
+    public async getRecentAnalysisSnapshots(limit: number = 500): Promise<AnalysisSnapshot[]> {
+        const collection = this.db.collection<AnalysisSnapshot>(this.analysisSnapshotsCollectionName);
+        return collection.find({}).sort({ createdAt: -1 }).limit(limit).toArray();
+    }
+
+    public async getActionableSetups(limit: number = 100): Promise<WithId<ActionableSetupRecord>[]> {
+        const collection = this.db.collection<ActionableSetupRecord>(this.actionableSetupsCollectionName);
+        return collection.find({}).sort({ updatedAt: -1 }).limit(limit).toArray();
+    }
+
+    public async getActionableSetupById(setupId: string): Promise<WithId<ActionableSetupRecord> | null> {
+        const collection = this.db.collection<ActionableSetupRecord>(this.actionableSetupsCollectionName);
+        return collection.findOne({ setupId });
+    }
+
+    public async getAnalysisSnapshotsByActionableSetupId(setupId: string, limit: number = 200): Promise<AnalysisSnapshot[]> {
+        const collection = this.db.collection<AnalysisSnapshot>(this.analysisSnapshotsCollectionName);
+        return collection.find({ actionableEntryZoneSetupId: setupId }).sort({ createdAt: -1 }).limit(limit).toArray();
+    }
+
+    public async saveActionableSetupEvent(event: ActionableSetupEvent): Promise<void> {
+        const collection = this.db.collection<ActionableSetupEvent>(this.actionableSetupEventsCollectionName);
+        await collection.insertOne(event);
+    }
+
+    public async getLatestActionableSetupEvent(setupId: string): Promise<WithId<ActionableSetupEvent> | null> {
+        const collection = this.db.collection<ActionableSetupEvent>(this.actionableSetupEventsCollectionName);
+        return collection.find({ setupId }).sort({ createdAt: -1 }).limit(1).next();
+    }
+
+    public async getActionableSetupEvents(setupId: string, limit: number = 300): Promise<WithId<ActionableSetupEvent>[]> {
+        const collection = this.db.collection<ActionableSetupEvent>(this.actionableSetupEventsCollectionName);
+        return collection.find({ setupId }).sort({ createdAt: -1 }).limit(limit).toArray();
+    }
+
+    public async saveTacticalSetupEvent(event: TacticalSetupEvent): Promise<void> {
+        const collection = this.db.collection<TacticalSetupEvent>(this.tacticalSetupEventsCollectionName);
+        await collection.insertOne(event);
+    }
+
+    public async getLatestTacticalSetupEvent(symbol: string): Promise<WithId<TacticalSetupEvent> | null> {
+        const collection = this.db.collection<TacticalSetupEvent>(this.tacticalSetupEventsCollectionName);
+        return collection.find({ symbol }).sort({ createdAt: -1 }).limit(1).next();
+    }
+
+    public async getTacticalSetupEvents(symbol: string, limit: number = 300): Promise<WithId<TacticalSetupEvent>[]> {
+        const collection = this.db.collection<TacticalSetupEvent>(this.tacticalSetupEventsCollectionName);
+        return collection.find({ symbol }).sort({ createdAt: -1 }).limit(limit).toArray();
+    }
+
     public async getTrackableAnalysisSignals(symbol: string, timeframe: string, limit: number = 20): Promise<WithId<AnalysisSignalRecord>[]> {
         const collection = this.db.collection<AnalysisSignalRecord>(this.analysisSignalsCollectionName);
         return collection.find({
@@ -484,6 +596,49 @@ export class DatabaseService {
     public async getAnalysisSignalHistory(symbol: string, limit: number = 10): Promise<AnalysisSignalRecord[]> {
         const collection = this.db.collection<AnalysisSignalRecord>(this.analysisSignalsCollectionName);
         return collection.find({ symbol }).sort({ createdAt: -1 }).limit(limit).toArray();
+    }
+
+    public async getRecentAnalysisSignals(limit: number = 500): Promise<AnalysisSignalRecord[]> {
+        const collection = this.db.collection<AnalysisSignalRecord>(this.analysisSignalsCollectionName);
+        return collection.find({}).sort({ createdAt: -1 }).limit(limit).toArray();
+    }
+
+    public async getDashboardAlertSettings(): Promise<DashboardAlertSettings> {
+        const collection = this.db.collection<DashboardAlertSettings>(this.dashboardAlertSettingsCollectionName);
+        const existing = await collection.findOne({ id: 'global' });
+        if (existing) return existing;
+
+        const defaults: DashboardAlertSettings = {
+            id: 'global',
+            mainDecisionChanges: true,
+            actionableInZone: true,
+            tacticalConfirmed: true,
+            marketFilterConflict: true,
+            minRiskReward: 1.8,
+            updatedAt: new Date()
+        };
+        await collection.updateOne({ id: 'global' }, { $setOnInsert: defaults }, { upsert: true });
+        return defaults;
+    }
+
+    public async updateDashboardAlertSettings(patch: Partial<Omit<DashboardAlertSettings, 'id' | 'updatedAt'>>): Promise<DashboardAlertSettings> {
+        const collection = this.db.collection<DashboardAlertSettings>(this.dashboardAlertSettingsCollectionName);
+        const allowedPatch: Partial<Omit<DashboardAlertSettings, 'id' | 'updatedAt'>> = {};
+        if (typeof patch.mainDecisionChanges === 'boolean') allowedPatch.mainDecisionChanges = patch.mainDecisionChanges;
+        if (typeof patch.actionableInZone === 'boolean') allowedPatch.actionableInZone = patch.actionableInZone;
+        if (typeof patch.tacticalConfirmed === 'boolean') allowedPatch.tacticalConfirmed = patch.tacticalConfirmed;
+        if (typeof patch.marketFilterConflict === 'boolean') allowedPatch.marketFilterConflict = patch.marketFilterConflict;
+        if (typeof patch.minRiskReward === 'number' && patch.minRiskReward >= 1 && patch.minRiskReward <= 5) {
+            allowedPatch.minRiskReward = patch.minRiskReward;
+        }
+
+        const defaults = await this.getDashboardAlertSettings();
+        await collection.updateOne(
+            { id: 'global' },
+            { $set: { ...defaults, ...allowedPatch, id: 'global', updatedAt: new Date() } },
+            { upsert: true }
+        );
+        return this.getDashboardAlertSettings();
     }
     
     public async deleteOldLiquidations(olderThan: Date): Promise<number> {

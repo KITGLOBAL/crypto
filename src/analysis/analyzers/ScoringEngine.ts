@@ -77,6 +77,7 @@ export type ScoringOutput = {
 
 export class ScoringEngine {
     public score(input: ScoringInput): ScoringOutput {
+        input = this.sanitizeInput(input);
         const categories: CategoryScore[] = [];
         const isBtc = input.symbol === 'BTCUSDT';
 
@@ -386,6 +387,21 @@ export class ScoringEngine {
 
     private formatPp(value: number): string {
         return `${value >= 0 ? '+' : ''}${value.toFixed(2)} pp`;
+    }
+
+    private sanitizeInput(input: ScoringInput): ScoringInput {
+        return this.replaceNullNumbers(input) as ScoringInput;
+    }
+
+    private replaceNullNumbers(value: unknown): unknown {
+        if (value === null) return 0;
+        if (Array.isArray(value)) return value.map(item => this.replaceNullNumbers(item));
+        if (typeof value === 'object' && value !== undefined) {
+            return Object.fromEntries(
+                Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, this.replaceNullNumbers(item)])
+            );
+        }
+        return value;
     }
 
     private scoreVolatility(h4Trend: TrendAnalysis, atr: AtrAnalysis): CategoryScore {

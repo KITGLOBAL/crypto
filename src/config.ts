@@ -160,3 +160,13 @@ export const ANALYSIS_AI_SUMMARY_ENABLED = process.env.ANALYSIS_AI_SUMMARY_ENABL
 export const ANALYSIS_AI_MODEL = process.env.ANALYSIS_AI_MODEL || 'gpt-4o-mini';
 export const ANALYSIS_SNAPSHOT_ENABLED = process.env.ANALYSIS_SNAPSHOT_ENABLED !== 'false';
 export const ANALYSIS_SNAPSHOT_CRON = process.env.ANALYSIS_SNAPSHOT_CRON || '20 * * * *';
+export const API_PORT = parseInt(process.env.API_PORT || '3000', 10);
+export const API_SCHEMA_VERSION = process.env.API_SCHEMA_VERSION || '2026-05-06';
+export const API_BASIC_AUTH_USER = process.env.API_BASIC_AUTH_USER || '';
+export const API_BASIC_AUTH_PASSWORD = process.env.API_BASIC_AUTH_PASSWORD || '';
+export const API_CORS_ORIGINS = (process.env.API_CORS_ORIGINS || '')
+    .split(',')
+    .map(origin => origin.trim())
+    .filter(Boolean);
+export const API_RATE_LIMIT_WINDOW_MS = parseInt(process.env.API_RATE_LIMIT_WINDOW_MS || '60000', 10);
+export const API_RATE_LIMIT_MAX = parseInt(process.env.API_RATE_LIMIT_MAX || '120', 10);

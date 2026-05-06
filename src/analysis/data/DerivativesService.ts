@@ -37,16 +37,17 @@ export class DerivativesService {
             };
         }
 
-        const fundingRate = stats.fundingRate;
-        const longShortRatio = stats.longShortRatio || 1;
+        const fundingRate = this.finiteNumber(stats.fundingRate, 0);
+        const openInterest = this.finiteNumber(stats.openInterest, 0);
+        const longShortRatio = this.finiteNumber(stats.longShortRatio, 1) || 1;
         const shortLongRatio = longShortRatio > 0 ? 1 / longShortRatio : 1;
         const fundingAvg30d = average(fundingRates);
         const fundingStd30d = this.standardDeviation(fundingRates);
         const fundingZScore30d = fundingStd30d > 0 ? (fundingRate - fundingAvg30d) / fundingStd30d : 0;
         const fundingPercentile30d = this.percentileRank(fundingRates, fundingRate);
-        const oiChange4h = this.percentChangeFromHistory(oiHistory.map(item => item.openInterestUsd), 1, stats.openInterest);
-        const oiChange24h = this.percentChangeFromHistory(oiHistory.map(item => item.openInterestUsd), 6, stats.openInterest);
-        const oiChange7d = this.percentChangeFromHistory(oiHistory.map(item => item.openInterestUsd), 42, stats.openInterest);
+        const oiChange4h = this.percentChangeFromHistory(oiHistory.map(item => item.openInterestUsd), 1, openInterest);
+        const oiChange24h = this.percentChangeFromHistory(oiHistory.map(item => item.openInterestUsd), 6, openInterest);
+        const oiChange7d = this.percentChangeFromHistory(oiHistory.map(item => item.openInterestUsd), 42, openInterest);
         const priceOiDivergence = this.classifyPriceOiDivergence(priceChange4h, oiChange4h, oiChange24h);
         let score = 0;
 
@@ -131,7 +132,7 @@ export class DerivativesService {
             fundingAvg30d,
             fundingZScore30d: Number(fundingZScore30d.toFixed(2)),
             fundingPercentile30d: Number(fundingPercentile30d.toFixed(0)),
-            openInterestUsd: stats.openInterest,
+            openInterestUsd: openInterest,
             longShortRatio,
             shortLongRatio,
             priceChange4h,
@@ -152,6 +153,11 @@ export class DerivativesService {
         const previous = values[index] || values[0];
         if (!previous || previous <= 0) return 0;
         return ((current - previous) / previous) * 100;
+    }
+
+    private finiteNumber(value: unknown, fallback: number): number {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
     }
 
     private classifyPriceOiDivergence(priceChange4h: number, oiChange4h: number, oiChange24h: number): DerivativesAnalysis['priceOiDivergence'] {

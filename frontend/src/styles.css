@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: theme('fontFamily.body');
+  background: #09111f;
+}
+
+option {
+  color: #0f172a;
+}

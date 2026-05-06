@@ -53,6 +53,7 @@ export function detectSwings(candles: Candle[], lookback: number = 3): SwingPoin
 }
 
 export function roundToTick(value: number): number {
+    if (!Number.isFinite(value)) return 0;
     if (value >= 1000) return Number(value.toFixed(1));
     if (value >= 100) return Number(value.toFixed(2));
     if (value >= 1) return Number(value.toFixed(4));

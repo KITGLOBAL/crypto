@@ -32,9 +32,9 @@ export class DominanceService {
 
             const global = await globalRes.json() as any;
             const tether = await tetherRes.json() as any;
-            const totalMarketCapUsd = Number(global.data?.total_market_cap?.usd || 0);
-            const btcDominance = Number(global.data?.market_cap_percentage?.btc || 0);
-            const usdtMarketCap = Number(tether.market_data?.market_cap?.usd || 0);
+            const totalMarketCapUsd = this.finiteNumber(global.data?.total_market_cap?.usd, 0);
+            const btcDominance = this.finiteNumber(global.data?.market_cap_percentage?.btc, 0);
+            const usdtMarketCap = this.finiteNumber(tether.market_data?.market_cap?.usd, 0);
             const usdtDominance = totalMarketCapUsd > 0 ? (usdtMarketCap / totalMarketCapUsd) * 100 : 0;
 
             const freshSnapshot = {
@@ -62,16 +62,17 @@ export class DominanceService {
     }
 
     private analyzeDominance(type: 'BTC.D' | 'USDT.D', value: number, history: DominanceSnapshot[]): DominanceAnalysis {
-        const values = history.map(item => item.value);
-        const positionInRange = this.getPositionInRange(type, value, values);
-        const change4h = this.getChange4h(value, history);
+        const safeValue = this.finiteNumber(value, 0);
+        const values = history.map(item => this.finiteNumber(item.value, 0)).filter(item => item > 0);
+        const positionInRange = this.getPositionInRange(type, safeValue, values);
+        const change4h = this.getChange4h(safeValue, history);
 
         if (values.length < 4) {
             if (type === 'USDT.D') {
-                const signalImpact = value >= 7.5 ? 'RISK_OFF' : value <= 5.5 ? 'RISK_ON' : 'NEUTRAL';
-                const score = value >= 7.5 ? -6 : value <= 5.5 ? 5 : 0;
+                const signalImpact = safeValue >= 7.5 ? 'RISK_OFF' : safeValue <= 5.5 ? 'RISK_ON' : 'NEUTRAL';
+                const score = safeValue >= 7.5 ? -6 : safeValue <= 5.5 ? 5 : 0;
                 return {
-                    value,
+                    value: safeValue,
                     trend: 'RANGE',
                     slope: 'UNKNOWN',
                     change: 0,
@@ -85,10 +86,10 @@ export class DominanceService {
                 };
             }
 
-            const signalImpact = value <= 53 ? 'RISK_ON' : 'NEUTRAL';
-            const score = value >= 60 ? -3 : value <= 53 ? 3 : 0;
+            const signalImpact = safeValue <= 53 ? 'RISK_ON' : 'NEUTRAL';
+            const score = safeValue >= 60 ? -3 : safeValue <= 53 ? 3 : 0;
             return {
-                value,
+                value: safeValue,
                 trend: 'RANGE',
                 slope: 'UNKNOWN',
                 change: 0,
@@ -111,14 +112,14 @@ export class DominanceService {
         const recentChange = recent[recent.length - 1] - recent[0];
         const slopeThreshold = type === 'BTC.D' ? 0.08 : 0.04;
         const slope = recentChange > slopeThreshold ? 'UP' : recentChange < -slopeThreshold ? 'DOWN' : 'FLAT';
-        const breakoutStatus = this.getBreakoutStatus(value, values, slope);
+        const breakoutStatus = this.getBreakoutStatus(safeValue, values, slope);
 
         if (type === 'USDT.D') {
             if (trend === 'DOWN') {
-                return this.buildDominanceResult(type, value, trend, slope, change, change4h, positionInRange, breakoutStatus, 'RISK_ON', 12, 'USDT market cap / total crypto market cap');
+                return this.buildDominanceResult(type, safeValue, trend, slope, change, change4h, positionInRange, breakoutStatus, 'RISK_ON', 12, 'USDT market cap / total crypto market cap');
             }
             if (trend === 'UP') {
-                return this.buildDominanceResult(type, value, trend, slope, change, change4h, positionInRange, breakoutStatus, 'RISK_OFF', -15, 'USDT market cap / total crypto market cap');
+                return this.buildDominanceResult(type, safeValue, trend, slope, change, change4h, positionInRange, breakoutStatus, 'RISK_OFF', -15, 'USDT market cap / total crypto market cap');
             }
             const rangeScore = slope === 'DOWN' && positionInRange === 'RESISTANCE'
                 ? 6
@@ -130,17 +131,17 @@ export class DominanceService {
                             ? -3
                             : 0;
             const impact = rangeScore > 0 ? 'RISK_ON' : rangeScore < 0 ? 'RISK_OFF' : 'NEUTRAL';
-            return this.buildDominanceResult(type, value, trend, slope, change, change4h, positionInRange, breakoutStatus, impact, rangeScore, 'USDT market cap / total crypto market cap');
+            return this.buildDominanceResult(type, safeValue, trend, slope, change, change4h, positionInRange, breakoutStatus, impact, rangeScore, 'USDT market cap / total crypto market cap');
         }
 
         if (trend === 'DOWN') {
-            return this.buildDominanceResult(type, value, trend, slope, change, change4h, positionInRange, breakoutStatus, 'RISK_ON', 6, 'CoinGecko BTC market cap dominance');
+            return this.buildDominanceResult(type, safeValue, trend, slope, change, change4h, positionInRange, breakoutStatus, 'RISK_ON', 6, 'CoinGecko BTC market cap dominance');
         }
         if (trend === 'UP') {
-            return this.buildDominanceResult(type, value, trend, slope, change, change4h, positionInRange, breakoutStatus, 'NEUTRAL', -6, 'CoinGecko BTC market cap dominance');
+            return this.buildDominanceResult(type, safeValue, trend, slope, change, change4h, positionInRange, breakoutStatus, 'NEUTRAL', -6, 'CoinGecko BTC market cap dominance');
         }
         const rangeScore = slope === 'DOWN' ? 3 : slope === 'UP' ? -3 : 0;
-        return this.buildDominanceResult(type, value, trend, slope, change, change4h, positionInRange, breakoutStatus, rangeScore > 0 ? 'RISK_ON' : 'NEUTRAL', rangeScore, 'CoinGecko BTC market cap dominance');
+        return this.buildDominanceResult(type, safeValue, trend, slope, change, change4h, positionInRange, breakoutStatus, rangeScore > 0 ? 'RISK_ON' : 'NEUTRAL', rangeScore, 'CoinGecko BTC market cap dominance');
     }
 
     private buildDominanceResult(
@@ -219,6 +220,11 @@ export class DominanceService {
                 return timestamp <= targetTime;
             })
             .at(-1) || history[0];
-        return value - baseline.value;
+        return value - this.finiteNumber(baseline.value, 0);
+    }
+
+    private finiteNumber(value: unknown, fallback: number): number {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
     }
 }

@@ -1,5 +1,5 @@
 import { ANALYSIS_AI_MODEL, ANALYSIS_AI_SUMMARY_ENABLED, ANALYSIS_TOP_SYMBOLS, OPENAI_API_KEY } from '../config';
-import { ActionableEntryZone, AnalysisResult, AnalysisSnapshot, Candle, DerivativesAnalysis, RetestAnalysis, RiskManagementPlan, SetupExpirationReason, SignalOutcome, Timeframe } from './types';
+import { ActionableEntryZone, AnalysisResult, AnalysisSnapshot, Candle, DerivativesAnalysis, RetestAnalysis, RiskManagementPlan, SetupExpirationReason, SignalOutcome, TacticalSetup, Timeframe } from './types';
 import { CandleService } from './data/CandleService';
 import { DominanceService } from './data/DominanceService';
 import { DerivativesService } from './data/DerivativesService';
@@ -7,7 +7,7 @@ import { TechnicalAnalyzers } from './analyzers/TechnicalAnalyzers';
 import { OrderFlowAnalyzer } from './analyzers/OrderFlowAnalyzer';
 import { ScoringEngine } from './analyzers/ScoringEngine';
 import { TacticalEntryAnalyzer } from './analyzers/TacticalEntryAnalyzer';
-import { ActionableSetupRecord, DatabaseService } from '../services/DatabaseService';
+import { ActionableSetupEventReason, ActionableSetupRecord, DatabaseService } from '../services/DatabaseService';
 import { RedisService } from '../services/RedisService';
 import { MarketDataService } from '../services/MarketDataService';
 
@@ -33,6 +33,12 @@ export class AnalysisService {
 
     public getSupportedSymbols(): string[] {
         return ANALYSIS_TOP_SYMBOLS;
+    }
+
+    public async getClosedCandles(symbolInput: string, timeframe: Timeframe = '4h', limit: number = 240): Promise<Candle[]> {
+        const symbol = this.normalizeSymbol(symbolInput);
+        const candles = await this.candleService.getCandles(symbol, timeframe, limit);
+        return this.stripOpenCandles({ [timeframe]: candles } as Record<Timeframe, Candle[]>)[timeframe];
     }
 
     public async analyze(symbolInput: string, locale: 'ru' | 'en' = 'en', options: { persistSignal?: boolean; includeAiSummary?: boolean; updateSignalTracking?: boolean } = {}): Promise<AnalysisResult> {
@@ -127,6 +133,7 @@ export class AnalysisService {
             h4Invalidation: scored.riskManagement.scenarioInvalidation,
             actionableEntryZone
         });
+        await this.recordTacticalSetupEvent(symbol, tacticalSetup);
         if (updateSignalTracking) {
             await this.updatePostSignalTracking(symbol, assetCandles['4h']);
         }
@@ -319,6 +326,7 @@ export class AnalysisService {
             h4Invalidation: scored.riskManagement.scenarioInvalidation,
             actionableEntryZone
         });
+        await this.recordTacticalSetupEvent(symbol, tacticalSetup);
 
         const snapshot: AnalysisSnapshot = {
             symbol,
@@ -477,6 +485,7 @@ export class AnalysisService {
                 expiredReason: 'TIME_EXPIRED',
                 updatedAt: now
             });
+            await this.recordActionableSetupEvent(active, 'EXPIRED', currentPrice, risk, 'TIME_EXPIRED');
             if (!candidate) {
                 return undefined;
             }
@@ -487,6 +496,7 @@ export class AnalysisService {
                     expiredReason: 'SCENARIO_TURNED_NEUTRAL',
                     updatedAt: now
                 });
+                await this.recordActionableSetupEvent(active, 'EXPIRED', currentPrice, risk, 'SCENARIO_TURNED_NEUTRAL');
             }
             return undefined;
         } else if (active && active.setupId === candidate.setupId) {
@@ -501,14 +511,23 @@ export class AnalysisService {
                 invalidation: risk.invalidation || risk.scenarioInvalidation,
                 updatedAt: now
             });
-            return this.toActionableEntryZone(active, status);
+            await this.recordActionableSetupEvent(
+                active,
+                status,
+                currentPrice,
+                risk,
+                status === 'INVALIDATED' ? 'INVALIDATION_HIT' : this.getActionableNotTradableReason(status, risk.riskReward) || 'STATUS_CHANGED'
+            );
+            return this.toActionableEntryZone({ ...active, riskReward: risk.riskReward }, status);
         } else if (active && candidate) {
+            const expiredReason = this.getReplacementReason(candidate);
             await this.dbService.updateActionableSetup(active.setupId, {
                 status: 'EXPIRED',
                 replacedBySetupId: candidate.setupId,
-                expiredReason: this.getReplacementReason(candidate),
+                expiredReason,
                 updatedAt: now
             });
+            await this.recordActionableSetupEvent(active, 'EXPIRED', currentPrice, risk, expiredReason);
         }
 
         if (!candidate) return undefined;
@@ -516,7 +535,92 @@ export class AnalysisService {
         const setup = this.buildActionableSetupRecord(symbol, candidate, currentPrice, risk, h4Candles);
         setup.status = this.calculateActionableZoneStatus(setup, currentPrice, risk);
         await this.dbService.createActionableSetup(setup);
+        await this.recordActionableSetupEvent(setup, setup.status, currentPrice, risk, 'SETUP_CREATED');
         return this.toActionableEntryZone(setup, setup.status);
+    }
+
+    private async recordActionableSetupEvent(
+        setup: Pick<ActionableSetupRecord, 'setupId' | 'symbol' | 'timeframe' | 'side' | 'from' | 'to' | 'source' | 'status'>,
+        status: ActionableEntryZone['status'],
+        currentPrice: number,
+        risk: RiskManagementPlan,
+        reason?: ActionableSetupEventReason
+    ): Promise<void> {
+        const latest = await this.dbService.getLatestActionableSetupEvent(setup.setupId);
+        const tradable = status === 'IN_ZONE' && risk.riskReward !== undefined && risk.riskReward >= 1.8;
+        const latestRr = latest?.riskReward !== undefined ? Number(latest.riskReward.toFixed(4)) : undefined;
+        const nextRr = risk.riskReward !== undefined ? Number(risk.riskReward.toFixed(4)) : undefined;
+        const latestRequired = latest?.requiredEntryForMinRr !== undefined ? Number(latest.requiredEntryForMinRr.toFixed(4)) : undefined;
+        const nextRequired = risk.requiredEntryForMinRr !== undefined ? Number(risk.requiredEntryForMinRr.toFixed(4)) : undefined;
+
+        if (
+            latest &&
+            latest.status === status &&
+            latest.tradable === tradable &&
+            latestRr === nextRr &&
+            latestRequired === nextRequired
+        ) {
+            return;
+        }
+
+        await this.dbService.saveActionableSetupEvent({
+            setupId: setup.setupId,
+            symbol: setup.symbol,
+            timeframe: setup.timeframe,
+            side: setup.side,
+            status,
+            previousStatus: latest?.status,
+            from: Math.min(setup.from, setup.to),
+            to: Math.max(setup.from, setup.to),
+            currentPrice,
+            requiredEntryForMinRr: risk.requiredEntryForMinRr,
+            riskReward: risk.riskReward,
+            tradable,
+            reason,
+            source: setup.source,
+            createdAt: new Date()
+        });
+    }
+
+    private async recordTacticalSetupEvent(symbol: string, tacticalSetup: TacticalSetup): Promise<void> {
+        const latest = await this.dbService.getLatestTacticalSetupEvent(symbol);
+        const nextZoneFrom = tacticalSetup.zone?.from;
+        const nextZoneTo = tacticalSetup.zone?.to;
+        const nextStop = tacticalSetup.stop?.price;
+        const latestRr = latest?.rr !== undefined ? Number(latest.rr.toFixed(4)) : undefined;
+        const nextRr = tacticalSetup.rr !== undefined ? Number(tacticalSetup.rr.toFixed(4)) : undefined;
+        const latestRequired = latest?.requiredEntryForMinRr !== undefined ? Number(latest.requiredEntryForMinRr.toFixed(4)) : undefined;
+        const nextRequired = tacticalSetup.requiredEntryForMinRr !== undefined ? Number(tacticalSetup.requiredEntryForMinRr.toFixed(4)) : undefined;
+
+        if (
+            latest &&
+            latest.status === tacticalSetup.status &&
+            latest.side === tacticalSetup.side &&
+            latest.zoneStatus === tacticalSetup.zoneStatus &&
+            latestRr === nextRr &&
+            latestRequired === nextRequired &&
+            latest.zoneFrom === nextZoneFrom &&
+            latest.zoneTo === nextZoneTo &&
+            latest.stop === nextStop
+        ) {
+            return;
+        }
+
+        await this.dbService.saveTacticalSetupEvent({
+            symbol,
+            timeframe: tacticalSetup.timeframe,
+            status: tacticalSetup.status,
+            previousStatus: latest?.status,
+            side: tacticalSetup.side,
+            zoneFrom: nextZoneFrom,
+            zoneTo: nextZoneTo,
+            zoneStatus: tacticalSetup.zoneStatus,
+            rr: tacticalSetup.rr,
+            stop: nextStop,
+            requiredEntryForMinRr: tacticalSetup.requiredEntryForMinRr,
+            reason: tacticalSetup.reason,
+            createdAt: new Date()
+        });
     }
 
     private buildActionableSetupRecord(

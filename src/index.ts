@@ -9,6 +9,7 @@ import { MarketDataService } from './services/MarketDataService';
 import { AnalysisService } from './analysis/AnalysisService';
 import { AnalysisSnapshotService } from './services/AnalysisSnapshotService';
 import { CHANNEL_MIN_LIQUIDATION, SYMBOLS_TO_TRACK } from './config';
+import { ApiService } from './api/ApiService';
 
 async function main() {
     console.log('Application starting...');
@@ -26,6 +27,7 @@ async function main() {
     const reportingService = new ReportingService(dbService, marketDataService);
     const analysisService = new AnalysisService(dbService, redisService, marketDataService);
     const analysisSnapshotService = new AnalysisSnapshotService(analysisService);
+    const apiService = new ApiService(dbService, analysisService);
     
     const telegramService = new TelegramService(
         process.env.TELEGRAM_BOT_TOKEN!,
@@ -60,6 +62,7 @@ async function main() {
     listener.start();
     reportingService.start();
     analysisSnapshotService.start();
+    apiService.start();
 
     console.log('✅ System Online: Redis + Cascades + Market Data + Analysis Snapshots active.');
 
@@ -72,6 +75,7 @@ async function main() {
         try {
             reportingService.stop();
             analysisSnapshotService.stop();
+            await apiService.stop();
             await listener.stop();
             await telegramService.stop();
             await redisService.close();

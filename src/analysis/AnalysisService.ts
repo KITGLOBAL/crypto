@@ -547,11 +547,13 @@ export class AnalysisService {
         reason?: ActionableSetupEventReason
     ): Promise<void> {
         const latest = await this.dbService.getLatestActionableSetupEvent(setup.setupId);
-        const tradable = status === 'IN_ZONE' && risk.riskReward !== undefined && risk.riskReward >= 1.8;
-        const latestRr = latest?.riskReward !== undefined ? Number(latest.riskReward.toFixed(4)) : undefined;
-        const nextRr = risk.riskReward !== undefined ? Number(risk.riskReward.toFixed(4)) : undefined;
-        const latestRequired = latest?.requiredEntryForMinRr !== undefined ? Number(latest.requiredEntryForMinRr.toFixed(4)) : undefined;
-        const nextRequired = risk.requiredEntryForMinRr !== undefined ? Number(risk.requiredEntryForMinRr.toFixed(4)) : undefined;
+        const nextRiskReward = this.optionalFiniteNumber(risk.riskReward);
+        const nextRequiredEntry = this.optionalFiniteNumber(risk.requiredEntryForMinRr);
+        const tradable = status === 'IN_ZONE' && nextRiskReward !== undefined && nextRiskReward >= 1.8;
+        const latestRr = this.roundOptional(latest?.riskReward, 4);
+        const nextRr = this.roundOptional(nextRiskReward, 4);
+        const latestRequired = this.roundOptional(latest?.requiredEntryForMinRr, 4);
+        const nextRequired = this.roundOptional(nextRequiredEntry, 4);
 
         if (
             latest &&
@@ -573,8 +575,8 @@ export class AnalysisService {
             from: Math.min(setup.from, setup.to),
             to: Math.max(setup.from, setup.to),
             currentPrice,
-            requiredEntryForMinRr: risk.requiredEntryForMinRr,
-            riskReward: risk.riskReward,
+            requiredEntryForMinRr: nextRequiredEntry,
+            riskReward: nextRiskReward,
             tradable,
             reason,
             source: setup.source,
@@ -587,10 +589,12 @@ export class AnalysisService {
         const nextZoneFrom = tacticalSetup.zone?.from;
         const nextZoneTo = tacticalSetup.zone?.to;
         const nextStop = tacticalSetup.stop?.price;
-        const latestRr = latest?.rr !== undefined ? Number(latest.rr.toFixed(4)) : undefined;
-        const nextRr = tacticalSetup.rr !== undefined ? Number(tacticalSetup.rr.toFixed(4)) : undefined;
-        const latestRequired = latest?.requiredEntryForMinRr !== undefined ? Number(latest.requiredEntryForMinRr.toFixed(4)) : undefined;
-        const nextRequired = tacticalSetup.requiredEntryForMinRr !== undefined ? Number(tacticalSetup.requiredEntryForMinRr.toFixed(4)) : undefined;
+        const nextRiskReward = this.optionalFiniteNumber(tacticalSetup.rr);
+        const nextRequiredEntry = this.optionalFiniteNumber(tacticalSetup.requiredEntryForMinRr);
+        const latestRr = this.roundOptional(latest?.rr, 4);
+        const nextRr = this.roundOptional(nextRiskReward, 4);
+        const latestRequired = this.roundOptional(latest?.requiredEntryForMinRr, 4);
+        const nextRequired = this.roundOptional(nextRequiredEntry, 4);
 
         if (
             latest &&
@@ -615,12 +619,22 @@ export class AnalysisService {
             zoneFrom: nextZoneFrom,
             zoneTo: nextZoneTo,
             zoneStatus: tacticalSetup.zoneStatus,
-            rr: tacticalSetup.rr,
+            rr: nextRiskReward,
             stop: nextStop,
-            requiredEntryForMinRr: tacticalSetup.requiredEntryForMinRr,
+            requiredEntryForMinRr: nextRequiredEntry,
             reason: tacticalSetup.reason,
             createdAt: new Date()
         });
+    }
+
+    private roundOptional(value: unknown, digits: number): number | undefined {
+        const parsed = this.optionalFiniteNumber(value);
+        return parsed === undefined ? undefined : Number(parsed.toFixed(digits));
+    }
+
+    private optionalFiniteNumber(value: unknown): number | undefined {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : undefined;
     }
 
     private buildActionableSetupRecord(
